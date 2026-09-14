@@ -33,7 +33,7 @@ k8s-openapi = { version = "0.28", features = ["v1_35"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt", "io", "compat"] }
 futures = "0.3"
-dirs = "6"
+dirs = "7"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 serde_yaml = "0.9"
 http = "1"
