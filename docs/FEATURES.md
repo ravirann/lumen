@@ -27,6 +27,14 @@ through a hosted control plane.
 - Remember namespaces per context, honor kubeconfig defaults, and enter a known
   namespace when discovery is denied. Workloads and triage retain successful
   results while explaining unavailable sources.
+- Inspect custom resources by served version and namespace with CRD printer
+  columns, schemas, and full controller conditions, including freshness.
+- Create, edit, and delete custom-resource instances with RBAC checks, server
+  validation, typed confirmation, and native context protection. Updates and
+  deletion retain UID/revision preconditions; CRD definitions remain read-only.
+
+See [custom resources and Helm repositories](CUSTOM_RESOURCES.md) for supported
+printer paths, permissions, mutation behavior, and repository setup.
 
 ## Device Resources
 
@@ -96,6 +104,8 @@ See [device resources](DEVICE_RESOURCES.md) for API requirements and observation
   draft does not undo a previously applied cluster change.
 - Delete resources with confirmation and RBAC preflight checks.
 - Manage Helm releases, including install, upgrade, rollback, and uninstall.
+- Add, list, remove, and refresh local Helm HTTP(S) repositories from the chart
+  picker, then choose a chart/version and deploy through the install wizard.
 - Browse Argo CD applications, resource trees, history, and sync status.
 - Inspect Tekton pipelines, pipeline runs, task runs, and status details.
 

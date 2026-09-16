@@ -1,364 +1,500 @@
 import { useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Boxes, Plus, RefreshCw } from "lucide-react";
+import { k8s, type CrdSummary } from "@/lib/k8s";
 import {
-  Boxes,
-  ChevronRight,
-  Copy,
-  RefreshCw,
-  Search,
-  X,
-} from "lucide-react";
-import { k8s, type CrInstance, type CrdSummary } from "@/lib/k8s";
+  customResources,
+  printerCell,
+  type CrdDetails,
+  type CustomResource,
+} from "@/lib/customResources";
+import { useNamespaceScope } from "@/hooks/useNamespaceScope";
+import { useMutationCapability } from "@/hooks/useMutationCapability";
+import { NamespacePicker } from "@/components/NamespacePicker";
+import { CustomResourceDialog } from "@/components/CustomResourceDialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { toast } from "sonner";
+import { errorMessage } from "@/lib/errorMessage";
 
 export function CrdBrowser() {
   const { ctx = "" } = useParams();
+  const [params] = useSearchParams();
   const context = decodeURIComponent(ctx);
-  const { data, isLoading, isFetching, refetch, error } = useQuery({
+  // Context changes drop explorer state; namespace/version changes remount its resource pane.
+  return (
+    <Explorer
+      key={context}
+      context={context}
+      requestedNamespace={params.get("ns")}
+    />
+  );
+}
+
+function Explorer({
+  context,
+  requestedNamespace,
+}: {
+  context: string;
+  requestedNamespace: string | null;
+}) {
+  const scope = useNamespaceScope(context, requestedNamespace);
+  const [params, setParams] = useSearchParams();
+  const selectedScope = {
+    ...scope,
+    setNamespace: (next: string) => {
+      scope.setNamespace(next);
+      if (requestedNamespace !== null) {
+        const updated = new URLSearchParams(params);
+        updated.set("ns", next);
+        setParams(updated, { replace: true });
+      }
+    },
+  };
+  const crds = useQuery({
     queryKey: ["k8s", "crds", context],
-    queryFn: () => k8s.listCrds(context || undefined),
+    queryFn: () => k8s.listCrds(context),
     staleTime: 60_000,
   });
-
-  const [selected, setSelected] = useState<CrdSummary | null>(null);
+  const [selectedName, setSelectedName] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [yamlOpen, setYamlOpen] = useState<{
-    instance: CrInstance;
-    crd: CrdSummary;
-  } | null>(null);
-
-  const grouped = useMemo(() => {
-    const all = data ?? [];
-    const q = query.trim().toLowerCase();
-    const matches = (c: CrdSummary) =>
-      !q ||
-      c.name.toLowerCase().includes(q) ||
-      c.group.toLowerCase().includes(q) ||
-      c.kind.toLowerCase().includes(q) ||
-      c.short_names.some((s) => s.toLowerCase().includes(q));
-    const groups = new Map<string, CrdSummary[]>();
-    for (const c of all.filter(matches)) {
-      const key = c.group || "(core)";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(c);
+  const selected = crds.data?.find((crd) => crd.name === selectedName);
+  const groups = useMemo(() => {
+    const filter = query.trim().toLowerCase();
+    const grouped = new Map<string, CrdSummary[]>();
+    for (const crd of crds.data ?? []) {
+      if (
+        filter &&
+        ![crd.name, crd.kind, crd.group, ...crd.short_names].some((text) =>
+          text.toLowerCase().includes(filter),
+        )
+      )
+        continue;
+      const group = grouped.get(crd.group) ?? [];
+      group.push(crd);
+      grouped.set(crd.group, group);
     }
-    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [data, query]);
-
+    return [...grouped].sort(([a], [b]) => a.localeCompare(b));
+  }, [crds.data, query]);
   return (
-    <div className="flex h-full">
-      <aside className="w-[340px] border-r border-term-border-soft bg-term-panel flex flex-col min-h-0">
-        <div className="flex items-center justify-between px-4 h-12 border-b border-term-border-soft shrink-0">
-          <h2 className="mds-heading text-[14px] text-term-fg flex items-center gap-2">
-            <Boxes className="size-4" /> CRDs
-            <span className="text-[11px] text-term-subtle font-normal">
-              {data?.length ?? 0}
-            </span>
-          </h2>
-          <button
-            onClick={() => refetch()}
-            disabled={isFetching}
-            className="text-term-muted hover:text-term-fg"
+    <div className="flex h-full min-h-0 flex-col bg-app md:flex-row">
+      <aside className="flex max-h-64 w-full shrink-0 flex-col border-b border-border-default bg-shell md:max-h-none md:w-64 md:border-b-0 md:border-r">
+        <div className="flex items-center justify-between gap-2 p-3">
+          <h1 className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+            <Boxes className="size-4" /> Custom resources
+          </h1>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Refresh CRDs"
+            disabled={crds.isFetching}
+            onClick={() => void crds.refetch()}
           >
-            <RefreshCw className={cn("size-3.5", isFetching && "animate-spin")} />
-          </button>
-        </div>
-        <div className="p-2 border-b border-term-border-soft">
-          <div className="flex items-center gap-2 h-8 px-2 rounded-md bg-term-bg border border-term-border-soft">
-            <Search className="size-3.5 text-term-subtle" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="filter by name, group, or kind..."
-              className="flex-1 bg-transparent outline-none text-[12px] text-term-fg placeholder:text-term-subtle"
+            <RefreshCw
+              className={cn("size-4", crds.isFetching && "animate-spin")}
             />
-          </div>
+          </Button>
         </div>
-        <div className="flex-1 overflow-y-auto">
-          {error ? (
-            <div className="p-3 text-[12px] text-term-red">
-              {(error as Error).message}
-            </div>
-          ) : isLoading ? (
-            <div className="p-3 text-[12px] text-term-muted">loading CRDs…</div>
-          ) : grouped.length === 0 ? (
-            <div className="p-3 text-[12px] text-term-muted">no CRDs match.</div>
+        <div className="px-3 pb-3">
+          <Input
+            aria-label="Filter CRDs"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Name, group, or kind…"
+          />
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto px-2 pb-3">
+          {crds.error && (
+            <p role="alert" className="p-2 text-xs text-danger">
+              CRD discovery unavailable: {errorMessage(crds.error)}
+            </p>
+          )}
+          {crds.isLoading ? (
+            <p className="p-2 text-xs text-text-muted">Loading CRDs…</p>
+          ) : groups.length === 0 && !crds.error ? (
+            <p className="p-2 text-xs text-text-muted">No matching CRDs.</p>
           ) : (
-            grouped.map(([group, crds]) => (
-              <div key={group} className="py-1">
-                <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-term-subtle">
+            groups.map(([group, definitions]) => (
+              <section key={group} className="mb-3">
+                <h2
+                  className="truncate px-2 py-1 text-xs text-text-muted"
+                  title={group}
+                >
                   {group}
-                </div>
-                {crds.map((c) => {
-                  const active = selected?.name === c.name;
-                  return (
-                    <button
-                      key={c.name}
-                      onClick={() => setSelected(c)}
-                      className={cn(
-                        "w-full text-left px-3 py-1.5 text-[12px] flex items-center gap-2 hover:bg-term-panel-2 transition-colors",
-                        active && "bg-term-green-soft",
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "text-term-fg truncate",
-                          active && "text-term-green",
-                        )}
-                      >
-                        {c.kind}
-                      </span>
-                      <span className="text-term-subtle text-[10px] font-mono truncate">
-                        {c.plural}
-                      </span>
-                      <span
-                        className={cn(
-                          "ml-auto text-[10px] px-1 py-0.5 rounded font-mono",
-                          c.scope === "Namespaced"
-                            ? "bg-info-soft text-info"
-                            : "bg-purple-100 text-purple-800 dark:bg-purple-500/10 dark:text-purple-300",
-                        )}
-                      >
-                        {c.scope[0]}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+                </h2>
+                {definitions.map((crd) => (
+                  <button
+                    key={crd.name}
+                    aria-label={`Select ${crd.kind}`}
+                    onClick={() => setSelectedName(crd.name)}
+                    aria-pressed={selectedName === crd.name}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 rounded-control px-2 py-2 text-left text-sm hover:bg-hover",
+                      selectedName === crd.name
+                        ? "bg-accent-primary-soft text-accent-primary"
+                        : "text-text-primary",
+                    )}
+                  >
+                    <span className="truncate">{crd.kind}</span>
+                    <span className="text-xs text-text-muted">
+                      {crd.scope === "Namespaced" ? "NS" : "Cluster"}
+                    </span>
+                  </button>
+                ))}
+              </section>
             ))
           )}
         </div>
       </aside>
-
-      <main className="flex-1 min-w-0 overflow-hidden">
+      <main className="min-h-0 min-w-0 flex-1 overflow-auto">
         {!selected ? (
-          <div className="h-full flex flex-col items-center justify-center text-center text-term-muted gap-2">
+          <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 p-6 text-center text-text-secondary">
             <Boxes className="size-6" />
-            <p className="text-[13px]">select a CRD to list its instances</p>
+            <p>Select a CRD to inspect and manage its custom resources.</p>
+            <p className="text-xs">
+              Discovery uses your current cluster permissions.
+            </p>
           </div>
         ) : (
-          <InstanceTable
+          <Definition
+            key={`${selected.name}/${scope.namespace}`}
             context={context}
-            crd={selected}
-            onInspect={(inst) => setYamlOpen({ instance: inst, crd: selected })}
+            summary={selected}
+            scope={selectedScope}
           />
         )}
       </main>
+    </div>
+  );
+}
 
-      {yamlOpen && (
-        <YamlModal
+function Definition({
+  context,
+  summary,
+  scope,
+}: {
+  context: string;
+  summary: CrdSummary;
+  scope: ReturnType<typeof useNamespaceScope>;
+}) {
+  const details = useQuery({
+    queryKey: ["k8s", "crd-details", context, summary.name],
+    queryFn: () => customResources.details(summary.name, context),
+    staleTime: 30_000,
+  });
+  const [version, setVersion] = useState(summary.preferred_version);
+  const selectedVersion =
+    details.data?.versions.find((item) => item.name === version && item.served)
+      ?.name ?? details.data?.versions.find((item) => item.served)?.name;
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border-default bg-shell p-4">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-text-primary">
+            {summary.kind}
+          </h2>
+          <p className="break-all text-xs text-text-muted">
+            {summary.name} · {summary.scope}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-text-secondary">
+            Version
+            <select
+              aria-label="CRD version"
+              value={selectedVersion ?? ""}
+              onChange={(event) => setVersion(event.target.value)}
+              className="rounded-control border border-border-default bg-elevated px-2 py-2 text-text-primary"
+            >
+              {details.data?.versions
+                .filter((item) => item.served)
+                .map((item) => (
+                  <option value={item.name} key={item.name}>
+                    {item.name}
+                    {item.storage ? " · storage" : ""}
+                  </option>
+                ))}
+            </select>
+          </label>
+          {summary.scope === "Namespaced" && (
+            <NamespacePicker
+              value={scope.namespace}
+              namespaces={scope.namespaces}
+              onChange={scope.setNamespace}
+            />
+          )}
+        </div>
+      </div>
+      {!!scope.discoveryError && summary.scope === "Namespaced" && (
+        <p className="px-4 pt-3 text-xs text-warning">
+          Namespace discovery unavailable. Choose or enter a known namespace to
+          continue.
+        </p>
+      )}
+      {details.error && (
+        <div role="alert" className="p-4 text-sm text-danger">
+          {errorMessage(details.error)}{" "}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void details.refetch()}
+          >
+            Retry definition
+          </Button>
+        </div>
+      )}
+      {details.isLoading && (
+        <p className="p-4 text-sm text-text-muted">Loading definition…</p>
+      )}
+      {details.data && !selectedVersion && (
+        <p className="p-4 text-sm text-warning">
+          This CRD has no served versions.
+        </p>
+      )}
+      {details.data && selectedVersion && (
+        <Resources
+          key={selectedVersion}
           context={context}
-          crd={yamlOpen.crd}
-          instance={yamlOpen.instance}
-          onClose={() => setYamlOpen(null)}
+          crd={details.data}
+          version={selectedVersion}
+          namespace={scope.namespace}
+          scopeLoading={scope.isLoading && summary.scope === "Namespaced"}
         />
       )}
     </div>
   );
 }
 
-function InstanceTable({
+function Resources({
   context,
   crd,
-  onInspect,
+  version,
+  namespace,
+  scopeLoading,
 }: {
   context: string;
-  crd: CrdSummary;
-  onInspect: (i: CrInstance) => void;
+  crd: CrdDetails;
+  version: string;
+  namespace: string;
+  scopeLoading: boolean;
 }) {
-  const { data, isLoading, error, isFetching, refetch } = useQuery({
-    queryKey: ["k8s", "cr-instances", context, crd.name, crd.preferred_version],
-    queryFn: () =>
-      k8s.listCrInstances(
-        crd.group,
-        crd.preferred_version,
-        crd.kind,
-        crd.plural,
-        undefined,
-        context || undefined,
-      ),
-    staleTime: 10_000,
-  });
-
-  return (
-    <div className="h-full flex flex-col">
-      <div className="flex items-center justify-between px-5 py-3 border-b border-term-border-soft bg-term-panel">
-        <div className="min-w-0">
-          <h2 className="mds-heading text-[16px] text-term-fg flex items-center gap-2">
-            {crd.kind}
-            <span className="text-[11px] text-term-subtle font-mono">
-              {crd.group}/{crd.preferred_version}
-            </span>
-          </h2>
-          <p className="text-[11px] text-term-muted">
-            {crd.scope} · {crd.plural}
-            {crd.short_names.length > 0 &&
-              ` · aliases: ${crd.short_names.join(", ")}`}
-          </p>
-        </div>
-        <button
-          onClick={() => refetch()}
-          disabled={isFetching}
-          className="term-btn !min-h-[32px] !py-1.5 !px-3 !text-[12px]"
-        >
-          <RefreshCw className={cn("size-3.5", isFetching && "animate-spin")} />
-        </button>
-      </div>
-      <div className="flex-1 overflow-auto">
-        {error ? (
-          <div className="p-4 text-[12px] text-term-red">
-            {(error as Error).message}
-          </div>
-        ) : isLoading ? (
-          <div className="p-4 text-[12px] text-term-muted">loading…</div>
-        ) : (data ?? []).length === 0 ? (
-          <div className="p-6 text-center text-[13px] text-term-muted">
-            no instances of <span className="text-term-fg">{crd.kind}</span>.
-          </div>
-        ) : (
-          <table className="w-full text-[12px]">
-            <thead className="sticky top-0 bg-term-panel">
-              <tr className="text-term-subtle text-[10px] uppercase tracking-wider">
-                <th className="text-left px-4 py-2">name</th>
-                {crd.scope === "Namespaced" && (
-                  <th className="text-left px-4 py-2">namespace</th>
-                )}
-                <th className="text-left px-4 py-2">status</th>
-                <th className="text-left px-4 py-2">age</th>
-                <th className="text-right px-4 py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {(data ?? []).map((inst) => (
-                <tr
-                  key={`${inst.namespace ?? ""}/${inst.name}`}
-                  className="border-b border-term-border-soft hover:bg-term-panel-2"
-                >
-                  <td className="px-4 py-2 text-term-fg font-mono">
-                    {inst.name}
-                  </td>
-                  {crd.scope === "Namespaced" && (
-                    <td className="px-4 py-2 text-term-muted font-mono">
-                      {inst.namespace ?? "—"}
-                    </td>
-                  )}
-                  <td className="px-4 py-2 text-term-muted font-mono">
-                    {inst.status_hint ?? "—"}
-                  </td>
-                  <td className="px-4 py-2 text-term-muted tabular-nums">
-                    {formatAge(inst.age_seconds)}
-                  </td>
-                  <td className="px-4 py-2 text-right">
-                    <button
-                      onClick={() => onInspect(inst)}
-                      className="text-term-subtle hover:text-term-green inline-flex items-center gap-1 text-[11px]"
-                    >
-                      yaml <ChevronRight className="size-3" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
+  const capability = useMutationCapability(context);
+  const [query, setQuery] = useState("");
+  const [advanced, setAdvanced] = useState(false);
+  const [selected, setSelected] = useState<CustomResource | "create" | null>(
+    null,
   );
-}
-
-function YamlModal({
-  context,
-  crd,
-  instance,
-  onClose,
-}: {
-  context: string;
-  crd: CrdSummary;
-  instance: CrInstance;
-  onClose: () => void;
-}) {
-  const { data, isLoading, error } = useQuery({
+  const resources = useQuery({
     queryKey: [
       "k8s",
-      "cr-yaml",
+      "custom-resources",
       context,
       crd.name,
-      instance.namespace,
-      instance.name,
+      version,
+      crd.scope === "Namespaced" ? namespace : null,
     ],
     queryFn: () =>
-      k8s.getCrYaml(
-        crd.group,
-        crd.preferred_version,
-        crd.kind,
-        crd.plural,
-        instance.name,
-        instance.namespace ?? undefined,
-        context || undefined,
+      customResources.list(
+        crd.name,
+        version,
+        crd.scope === "Namespaced" ? namespace || null : null,
+        context,
       ),
+    enabled: !scopeLoading,
+    staleTime: 10_000,
   });
-
-  const copy = async () => {
-    if (!data) return;
-    await navigator.clipboard.writeText(data);
-    toast.success("YAML copied");
-  };
-
+  const columns = (resources.data?.columns ?? [])
+    .map((column, index) => ({ ...column, index }))
+    .filter((column) => advanced || column.priority === 0);
+  const filter = query.trim().toLowerCase();
+  const items = (resources.data?.items ?? []).filter(
+    (item) =>
+      !filter ||
+      `${item.name} ${item.namespace ?? ""} ${item.status_hint ?? ""}`
+        .toLowerCase()
+        .includes(filter),
+  );
   return (
-    <div
-      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-8"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="bg-term-panel border border-term-border rounded-lg shadow-2xl max-w-4xl w-full max-h-[85vh] flex flex-col"
-      >
-        <div className="flex items-center justify-between px-4 h-11 border-b border-term-border-soft">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="text-[12px] text-term-muted font-mono">
-              {crd.kind}
-            </span>
-            <span className="text-term-subtle">·</span>
-            <span className="text-[12px] text-term-fg truncate">
-              {instance.namespace ? `${instance.namespace}/` : ""}
-              {instance.name}
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={copy}
-              className="term-btn !min-h-[28px] !py-1 !px-2 !text-[11px]"
-            >
-              <Copy className="size-3" /> copy
-            </button>
-            <button onClick={onClose} className="text-term-subtle hover:text-term-fg">
-              <X className="size-4" />
-            </button>
-          </div>
-        </div>
-        <div className="flex-1 overflow-auto p-0">
-          {error ? (
-            <pre className="p-4 text-[12px] text-term-red whitespace-pre-wrap">
-              {(error as Error).message}
-            </pre>
-          ) : isLoading ? (
-            <div className="p-4 text-[12px] text-term-muted">loading…</div>
-          ) : (
-            <pre className="p-4 text-[12px] text-term-fg font-mono leading-relaxed whitespace-pre">
-              {data}
-            </pre>
-          )}
+    <>
+      <div className="flex flex-wrap items-center gap-3 p-4">
+        <Input
+          className="max-w-xs"
+          aria-label="Filter custom resources"
+          placeholder="Filter name, namespace, or status…"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <label className="flex items-center gap-2 text-xs text-text-secondary">
+          <input
+            type="checkbox"
+            checked={advanced}
+            onChange={(event) => setAdvanced(event.target.checked)}
+          />{" "}
+          Additional columns
+        </label>
+        <div className="ml-auto flex gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            aria-label="Refresh resources"
+            disabled={resources.isFetching}
+            onClick={() => void resources.refetch()}
+          >
+            <RefreshCw
+              className={cn("size-4", resources.isFetching && "animate-spin")}
+            />{" "}
+            Refresh
+          </Button>
+          <Button
+            size="sm"
+            disabled={capability.globalReadOnly}
+            title={
+              capability.globalReadOnly
+                ? capability.reason
+                : "Create a custom-resource instance"
+            }
+            onClick={() => setSelected("create")}
+          >
+            <Plus className="size-4" /> Create resource
+          </Button>
         </div>
       </div>
-    </div>
+      {resources.error && (
+        <p role="alert" className="px-4 pb-3 text-sm text-danger">
+          Resources unavailable: {errorMessage(resources.error)}
+        </p>
+      )}
+      <details className="mx-4 mb-3 text-xs text-text-secondary">
+        <summary className="cursor-pointer">
+          CRD definition · schema and versions
+        </summary>
+        <p className="my-2">
+          {crd.versions
+            .map(
+              (item) =>
+                `${item.name}: ${item.served ? "served" : "not served"}${item.storage ? ", storage" : ""}`,
+            )
+            .join(" · ")}
+        </p>
+        <pre className="max-h-64 overflow-auto rounded-control bg-shell p-3">
+          {JSON.stringify(
+            crd.versions.find((item) => item.name === version)?.schema ??
+              "No schema published.",
+            null,
+            2,
+          )}
+        </pre>
+      </details>
+      <div className="min-h-0 flex-1 overflow-auto">
+        {resources.isLoading || scopeLoading ? (
+          <p className="p-4 text-sm text-text-muted">Loading resources…</p>
+        ) : items.length === 0 && !resources.error ? (
+          <p className="p-6 text-sm text-text-secondary">
+            {filter
+              ? "No resources match the filter."
+              : "No custom resources in this scope."}
+          </p>
+        ) : (
+          items.length > 0 && (
+            <table className="w-full text-left text-xs">
+              <thead className="sticky top-0 bg-shell text-text-muted">
+                <tr>
+                  <th className="px-4 py-2">Name</th>
+                  {crd.scope === "Namespaced" && (
+                    <th className="px-4 py-2">Namespace</th>
+                  )}
+                  <th className="px-4 py-2">Status</th>
+                  {columns.map((column) => (
+                    <th
+                      key={column.index}
+                      className="px-4 py-2"
+                      title={column.description ?? column.json_path}
+                    >
+                      {column.name}
+                    </th>
+                  ))}
+                  <th className="px-4 py-2">Age</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr
+                    key={item.uid ?? `${item.namespace}/${item.name}`}
+                    className="border-t border-border-subtle text-text-secondary hover:bg-hover"
+                  >
+                    <td className="px-4 py-3">
+                      <button
+                        className="font-mono text-accent-primary underline-offset-4 hover:underline"
+                        onClick={() => setSelected(item)}
+                        aria-label={`Inspect ${item.name}`}
+                      >
+                        {item.name}
+                      </button>
+                    </td>
+                    {crd.scope === "Namespaced" && (
+                      <td className="px-4 py-3">{item.namespace}</td>
+                    )}
+                    <td className="px-4 py-3">
+                      {item.status_hint ?? "Not reported"}
+                    </td>
+                    {columns.map((column) => {
+                      const cell = item.printer_cells[column.index];
+                      return (
+                        <td
+                          key={column.index}
+                          className="max-w-64 truncate px-4 py-3"
+                          title={
+                            cell?.supported
+                              ? printerCell(cell.value)
+                              : "This column uses an unsupported JSONPath. Inspect YAML for the value."
+                          }
+                        >
+                          {cell?.supported
+                            ? printerCell(cell.value)
+                            : "Unsupported path"}
+                        </td>
+                      );
+                    })}
+                    <td className="px-4 py-3 tabular-nums">
+                      {formatAge(item.age_seconds)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+        )}
+      </div>
+      {resources.dataUpdatedAt > 0 && (
+        <p className="border-t border-border-subtle px-4 py-2 text-xs text-text-muted">
+          {resources.data?.items.length ?? 0} resources · fetched{" "}
+          {new Date(resources.dataUpdatedAt).toLocaleTimeString()} ·
+          controller-reported status
+        </p>
+      )}
+      {selected && (
+        <CustomResourceDialog
+          key={
+            selected === "create"
+              ? "create"
+              : `${selected.uid}/${selected.name}`
+          }
+          context={context}
+          crd={crd}
+          version={version}
+          namespace={namespace}
+          resource={selected === "create" ? undefined : selected}
+          onClose={() => setSelected(null)}
+        />
+      )}
+    </>
   );
 }
 
-function formatAge(s: number): string {
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
+function formatAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
 }

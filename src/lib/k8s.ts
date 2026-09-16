@@ -18,10 +18,10 @@ const mutationCommands = new Set([
   "cordon_node", "uncordon_node", "drain_node", "trigger_cronjob", "delete_resource",
   "apply_resource", "helm_install", "helm_upgrade", "helm_rollback", "helm_uninstall",
   "create_debug_container", "start_pod_attach", "sync_argocd_application", "terminate_argocd_operation",
-  "refresh_argocd_application", "cancel_pipeline_run",
+  "refresh_argocd_application", "cancel_pipeline_run", "write_cr", "delete_cr",
 ]);
-async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  const preview = command === "apply_resource" && args?.dryRun === true ||
+export async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const preview = (command === "apply_resource" || command === "write_cr") && args?.dryRun === true ||
     (command === "helm_install" || command === "helm_upgrade") && (args?.request as { dry_run?: boolean } | undefined)?.dry_run === true;
   if (mutationCommands.has(command) && (typeof args?.context !== "string" || !args.context.trim())) throw new Error("An explicit target context is required for this action.");
   if (mutationCommands.has(command) && !preview) {

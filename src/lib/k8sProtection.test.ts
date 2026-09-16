@@ -1,12 +1,15 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { k8s } from "./k8s";
+import { customResources } from "./customResources";
 import { useUiSettings } from "@/state/uiSettings";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 beforeEach(() => { vi.clearAllMocks(); useUiSettings.setState({ readOnly: false }); });
 it("blocks every mutation family before dispatch to a protected context", async () => {
   vi.mocked(invoke).mockResolvedValue({ context: "prod", protected: true, unlocked_until_ms: null, can_mutate: false });
   const calls = [
+    () => customResources.write({ crd_name: "widgets.example.io", version: "v1", namespace: "team", name: "sample" }, "", true, false, "prod"),
+    () => customResources.delete({ crd_name: "widgets.example.io", version: "v1", namespace: "team", name: "sample", uid: "uid" }, "prod"),
     () => k8s.restartWorkload("ns", "deployment", "api", "prod"),
     () => k8s.deleteResource("ns", "pod", "api", "prod"),
     () => k8s.cordonNode("worker", "prod"),
