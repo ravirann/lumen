@@ -56,7 +56,7 @@ fn owner_refs_from(
 
 /// Resolve a kube::Client from either an explicit context (new multi-cluster
 /// flows) or the active context (legacy single-cluster flows).
-async fn client_for(state: &AppState, context: Option<&str>) -> AppResult<kube::Client> {
+pub(super) async fn client_for(state: &AppState, context: Option<&str>) -> AppResult<kube::Client> {
     let ctx = state.k8s.resolve_context(context).await?;
     state.k8s.client_for(&ctx).await
 }
@@ -154,7 +154,7 @@ async fn mutation_target(
     Ok((context, config, identity))
 }
 
-async fn mutation_client(
+pub(super) async fn mutation_client(
     state: &AppState,
     context: Option<&str>,
     dry_run: bool,
@@ -192,7 +192,7 @@ async fn mutation_client_from_config(
     Ok((context, client, identity, config))
 }
 
-fn require_current_target(
+pub(super) fn require_current_target(
     policy: &crate::protection::ContextProtectionPolicy,
     context: &str,
     identity: &str,

@@ -562,3 +562,174 @@ mod tests {
         assert!(!path.exists());
     }
 }
+
+// Repository settings use Helm's own local configuration and credential handling.
+// Serialize operations to avoid competing writes to repositories.yaml/index caches.
+static REPOSITORY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const REPOSITORY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HelmRepository {
+    pub name: String,
+    pub url: String,
+}
+
+fn validate_repository_name(name: &str) -> AppResult<()> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name.as_bytes()[0].is_ascii_alphanumeric()
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+    {
+        return Err(AppError::K8s("Repository name must start with a letter or number and contain only letters, numbers, dots, underscores or hyphens (maximum 128 characters).".into()));
+    }
+    Ok(())
+}
+
+fn validate_repository_url(url: &str) -> AppResult<()> {
+    let uri = url
+        .parse::<http::Uri>()
+        .map_err(|_| AppError::K8s("Enter a valid HTTP(S) repository URL.".into()))?;
+    if !matches!(uri.scheme_str(), Some("https" | "http"))
+        || uri.host().is_none_or(str::is_empty)
+        || uri.authority().is_some_and(|a| a.as_str().contains('@'))
+        || uri.query().is_some()
+        || url.contains('#')
+        || url.contains('\\')
+        || url.chars().any(char::is_whitespace)
+    {
+        return Err(AppError::K8s("Use an HTTP(S) repository URL without embedded credentials, query parameters or fragments. Configure authenticated repositories with your local Helm CLI.".into()));
+    }
+    Ok(())
+}
+
+fn parse_repository_output(json: &str) -> AppResult<Vec<HelmRepository>> {
+    if json.trim().is_empty() || json.trim() == "null" {
+        return Ok(vec![]);
+    }
+    let mut repositories: Vec<HelmRepository> = serde_json::from_str(json)
+        .map_err(|_| AppError::K8s("Unable to read Helm repository list.".into()))?;
+    // Existing CLI configuration may contain credentials. Never send them to the UI.
+    for repo in &mut repositories {
+        repo.url = repo
+            .url
+            .parse::<http::Uri>()
+            .ok()
+            .and_then(|uri| {
+                let scheme = uri.scheme_str()?;
+                let authority = uri.authority()?.as_str().rsplit('@').next()?;
+                Some(format!("{scheme}://{authority}{}", uri.path()))
+            })
+            .unwrap_or_else(|| "URL hidden (unsupported format)".into());
+    }
+    Ok(repositories)
+}
+
+async fn repository_output(args: &[&str]) -> AppResult<std::process::Output> {
+    let mut command = Command::new("helm");
+    command.args(args).kill_on_drop(true).stdin(Stdio::null());
+    tokio::time::timeout(REPOSITORY_TIMEOUT, command.output()).await
+        .map_err(|_| AppError::K8s("Helm repository operation timed out after 60 seconds. Check connectivity and retry.".into()))?
+        .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::K8s(HELM_NOT_FOUND_HINT.into())
+        } else { AppError::K8s("Unable to run the local Helm CLI.".into()) })
+}
+
+fn repository_result(output: std::process::Output) -> AppResult<()> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        // Helm stderr may include credentials from an existing repository URL.
+        Err(AppError::K8s("Helm repository operation failed. Check the repository name, URL, connectivity and authentication using your local Helm CLI.".into()))
+    }
+}
+
+pub async fn list_repositories() -> AppResult<Vec<HelmRepository>> {
+    let _lock = REPOSITORY_LOCK.lock().await;
+    let output = repository_output(&["repo", "list", "--output", "json"]).await?;
+    if !output.status.success() {
+        if String::from_utf8_lossy(&output.stderr).contains("no repositories") {
+            return Ok(vec![]);
+        }
+        repository_result(output)?;
+        return Ok(vec![]);
+    }
+    parse_repository_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub async fn add_repository(name: &str, url: &str) -> AppResult<()> {
+    validate_repository_name(name)?;
+    validate_repository_url(url)?;
+    let _lock = REPOSITORY_LOCK.lock().await;
+    repository_result(repository_output(&["repo", "add", name, url]).await?)
+}
+
+pub async fn remove_repository(name: &str) -> AppResult<()> {
+    validate_repository_name(name)?;
+    let _lock = REPOSITORY_LOCK.lock().await;
+    repository_result(repository_output(&["repo", "remove", name]).await?)
+}
+
+pub async fn update_repositories() -> AppResult<()> {
+    let _lock = REPOSITORY_LOCK.lock().await;
+    // Fail when any repository update fails instead of reporting partial success.
+    repository_result(repository_output(&["repo", "update", "--fail-on-repo-update-fail"]).await?)
+}
+
+#[cfg(test)]
+mod repository_tests {
+    use super::*;
+
+    #[test]
+    fn repository_names_cannot_be_flags_or_paths() {
+        for name in ["", "--debug", "a/b", "a b", ".", "a\n"] {
+            assert!(validate_repository_name(name).is_err(), "{name}");
+        }
+        for name in ["bitnami", "my-repo_2.local"] {
+            assert!(validate_repository_name(name).is_ok());
+        }
+    }
+
+    #[test]
+    fn repository_urls_require_http_without_credentials() {
+        for url in [
+            "--debug",
+            "file:///tmp/chart",
+            "oci://host/chart",
+            "https://u:p@host/chart",
+            "https://host/chart?token=secret",
+            "https://host/#secret",
+            "https://",
+            "https://host/ bad",
+        ] {
+            assert!(validate_repository_url(url).is_err(), "{url}");
+        }
+        assert!(validate_repository_url("https://charts.example.org/stable").is_ok());
+        assert!(validate_repository_url("http://localhost:8080/charts").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_failure_does_not_expose_cli_credentials() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(256),
+            stdout: b"secret-output".to_vec(),
+            stderr: b"failed https://user:secret-password@host/repo".to_vec(),
+        };
+        let error = repository_result(output).unwrap_err().to_string();
+        assert!(error.contains("operation failed"));
+        assert!(!error.contains("secret"));
+        assert!(!error.contains("user:"));
+    }
+
+    #[test]
+    fn repository_list_redacts_existing_credentials_and_queries() {
+        let repos = parse_repository_output(r#"[{"name":"private","url":"https://user:secret@charts.example.org/repo?token=secret"}]"#).unwrap();
+        assert_eq!(repos[0].url, "https://charts.example.org/repo");
+        assert!(parse_repository_output("[]").unwrap().is_empty());
+        assert!(parse_repository_output("null").unwrap().is_empty());
+        assert!(parse_repository_output("invalid").is_err());
+    }
+}

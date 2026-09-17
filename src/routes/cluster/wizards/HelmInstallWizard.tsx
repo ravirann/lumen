@@ -1,3 +1,4 @@
+import { HelmRepositories } from "@/components/HelmRepositories";
 import { useMutationCapability } from "@/hooks/useMutationCapability";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
@@ -453,6 +454,8 @@ function ChartPickerPanel({
       </div>
 
       <div className="flex flex-col gap-3">
+        <HelmRepositories />
+        {search.error && <p role="alert" className="text-[11px] text-error">Chart search failed. Check your local Helm configuration or enter a chart reference below.</p>}
         <div className="flex items-center gap-2 rounded border border-border-default bg-elevated px-2 h-9">
           <Search className="size-3.5 text-text-muted" />
           <input
