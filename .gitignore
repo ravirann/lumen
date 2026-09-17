@@ -31,6 +31,7 @@ dist-ssr
 .superpowers/
 
 # Local planning artifacts
+.claude/
 AGENTS.md
 docs/superpowers/
 docs/research/HEADLAMP_PARITY_MATRIX.md
