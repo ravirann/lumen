@@ -168,6 +168,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_negotiates_and_decodes_compressed_responses() {
+        use std::io::Write;
+        use wiremock::{
+            matchers::{header, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        let body = r#"{"major":"1","minor":"33","gitVersion":"v1.33.8","gitCommit":"test","gitTreeState":"clean","buildDate":"2026-01-01T00:00:00Z","goVersion":"go1.24","compiler":"gc","platform":"linux/amd64"}"#;
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(body.as_bytes()).unwrap();
+        Mock::given(path("/version"))
+            .and(header("accept-encoding", "gzip"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-encoding", "gzip")
+                    .set_body_bytes(gzip.finish().unwrap()),
+            )
+            .mount(&server)
+            .await;
+        let config: kube::config::Kubeconfig = serde_yaml::from_str(&format!("contexts: [{{name: dev, context: {{cluster: c}}}}]\nclusters: [{{name: c, cluster: {{server: {}}}}}]\n", server.uri())).unwrap();
+        let client = K8sState::build_client("dev", config).await.unwrap();
+        assert_eq!(
+            client.apiserver_version().await.unwrap().git_version,
+            "v1.33.8"
+        );
+
+        // A user's explicit kubeconfig opt-out still takes precedence.
+        server.reset().await;
+        Mock::given(path("/version"))
+            .and(|request: &wiremock::Request| !request.headers.contains_key("accept-encoding"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let config: kube::config::Kubeconfig = serde_yaml::from_str(&format!("contexts: [{{name: dev, context: {{cluster: c}}}}]\nclusters: [{{name: c, cluster: {{server: {}, disable-compression: true}}}}]\n", server.uri())).unwrap();
+        let client = K8sState::build_client("dev", config).await.unwrap();
+        assert_eq!(
+            client.apiserver_version().await.unwrap().git_version,
+            "v1.33.8"
+        );
+    }
+
+    #[tokio::test]
     async fn blocked_context_does_not_block_cached_peer_and_invalidation_discards_build() {
         let path = fixture("concurrency", "http://127.0.0.1:10001");
         let state = K8sState::default();

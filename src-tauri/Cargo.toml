@@ -1,6 +1,6 @@
 [package]
 name = "lumen"
-version = "0.18.0"
+version = "0.18.1"
 description = "Lumen - Kubernetes cluster workbench"
 authors = ["Lumen contributors"]
 edition = "2021"
@@ -27,7 +27,7 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-kube = { version = "4.2", default-features = false, features = ["client", "rustls-tls", "ring", "ws", "runtime"] }
+kube = { version = "4.2", default-features = false, features = ["client", "rustls-tls", "ring", "ws", "runtime", "gzip"] }
 # Preserve the Kubernetes 1.35 API target when upgrading the client crates.
 k8s-openapi = { version = "0.28", features = ["v1_35"] }
 tokio-stream = "0.1"

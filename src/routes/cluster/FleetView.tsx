@@ -86,6 +86,7 @@ function DistributionBadge({ value }: { value: string | undefined }) {
 
 function fleetRiskScore(card: FleetCard): number {
   if (!card.reachable) return 0;
+  if (card.error) return 4;
   if (card.context.is_prod && card.health.pods_failed > 0) return 1;
   if (card.health.pods_failed > 0) return 2;
   if ((card.cpu_percent ?? 0) >= 90 || (card.mem_percent ?? 0) >= 90) return 3;
@@ -301,14 +302,14 @@ function ClusterHealthTable({ cards }: { cards: FleetCard[] }) {
               const pending = card.health.pods_pending;
               const tone = !card.reachable
                 ? "bad"
-                : failed > 0
+                : card.error ? "warn" : failed > 0
                   ? "bad"
                   : pending > 0 || card.node_ready < card.node_count
                     ? "warn"
                     : "good";
               const status = !card.reachable
                 ? "Unreachable"
-                : failed > 0
+                : card.error ? "Incomplete" : failed > 0
                   ? "Unhealthy"
                   : pending > 0 || card.node_ready < card.node_count
                     ? "Degraded"
@@ -348,16 +349,16 @@ function ClusterHealthTable({ cards }: { cards: FleetCard[] }) {
                     </span>
                   </DataTableCell>
                   <DataTableCell className="tabular-nums">
-                    {card.node_ready}/{card.node_count}
+                    {card.error ? "—" : `${card.node_ready}/${card.node_count}`}
                   </DataTableCell>
                   <DataTableCell className="tabular-nums">
-                    {card.health.pods_ready}/{card.health.pods_total}
+                    {card.error ? "—" : `${card.health.pods_ready}/${card.health.pods_total}`}
                   </DataTableCell>
                   <DataTableCell>
-                    <CapacityBar value={card.cpu_percent} />
+                    <CapacityBar value={card.error ? null : card.cpu_percent} />
                   </DataTableCell>
                   <DataTableCell>
-                    <CapacityBar value={card.mem_percent} />
+                    <CapacityBar value={card.error ? null : card.mem_percent} />
                   </DataTableCell>
                   <DataTableCell className="px-4">
                     <StatusBadge status={status} />
@@ -374,7 +375,7 @@ function ClusterHealthTable({ cards }: { cards: FleetCard[] }) {
 
 function PressurePanel({ cards }: { cards: FleetCard[] }) {
   const top = [...cards]
-    .filter((card) => card.reachable)
+    .filter((card) => card.reachable && !card.error)
     .sort(
       (a, b) =>
         Math.max(b.cpu_percent ?? 0, b.mem_percent ?? 0) -
@@ -425,6 +426,10 @@ function AlertPanel({ cards }: { cards: FleetCard[] }) {
           meta: card.context.name,
           tone: "bad",
         });
+      }
+      if (card.reachable && card.error) {
+        items.push({ id: `${card.context.name}:inventory`, title: "Inventory incomplete", meta: card.context.name, tone: "warn" });
+        return items;
       }
       if (card.health.pods_failed > 0) {
         items.push({
@@ -704,7 +709,7 @@ function Card({
         <div
           className={cn(
             "size-2 rounded-full mt-1.5 shrink-0",
-            unreachable ? "bg-term-red" : "bg-success animate-pulse",
+            unreachable ? "bg-term-red" : card.error ? "bg-warning" : "bg-success animate-pulse",
           )}
         />
         <div className="flex-1 min-w-0">
@@ -736,7 +741,7 @@ function Card({
             {card.context.cluster} · {card.context.user}
           </div>
         </div>
-        {!unreachable && <PodRatioRing card={card} />}
+        {!unreachable && !card.error && <PodRatioRing card={card} />}
       </div>
 
       {unreachable ? (
@@ -744,6 +749,8 @@ function Card({
           <AlertTriangle className="size-3.5 mt-0.5 shrink-0" aria-hidden="true" />
           <span className="truncate">{classifyConnectionError(card.error ?? "unreachable").title}</span>
         </div>
+      ) : card.error ? (
+        <p role="status" className="text-xs text-warning">{card.error}</p>
       ) : (
         <>
           <div className="grid grid-cols-3 gap-3 text-[12px]">
@@ -999,7 +1006,7 @@ export function FleetView() {
   }, [cardsByContext, connecting, contexts, hidden]);
 
   const cards = sorted.flatMap((entry) => (entry.card ? [entry.card] : []));
-  const reach = cards.filter((c) => c.reachable);
+  const reach = cards.filter((c) => c.reachable && !c.error);
   const totalNodes = reach.reduce((sum, card) => sum + card.node_count, 0);
   const readyNodes = reach.reduce((sum, card) => sum + card.node_ready, 0);
   const totalPods = reach.reduce((sum, card) => sum + card.health.pods_total, 0);
@@ -1201,10 +1208,10 @@ export function FleetView() {
             <MetricTile
               icon={<Server className="size-3.5" />}
               label="Nodes"
-              value={cards.length ? formatNumber(totalNodes) : "—"}
+              value={reach.length ? formatNumber(totalNodes) : "—"}
               sub={
                 <span>
-                  {cards.length ? `${readyNodes}/${totalNodes} ready` : "Connect to scan"}
+                  {reach.length ? `${readyNodes}/${totalNodes} ready` : "Connect to scan"}
                 </span>
               }
               tone={readyNodes < totalNodes ? "warn" : "good"}
@@ -1212,10 +1219,10 @@ export function FleetView() {
             <MetricTile
               icon={<CircleDot className="size-3.5" />}
               label="Pods"
-              value={cards.length ? formatNumber(totalPods) : "—"}
+              value={reach.length ? formatNumber(totalPods) : "—"}
               sub={
                 <span>
-                  {cards.length ? `${unhealthyPods} unhealthy` : "Waiting for data"}
+                  {reach.length ? `${unhealthyPods} unhealthy` : "Waiting for data"}
                 </span>
               }
               tone={unhealthyPods > 0 ? "bad" : "good"}
@@ -1223,8 +1230,8 @@ export function FleetView() {
             <MetricTile
               icon={<Layers3 className="size-3.5" />}
               label="Workloads"
-              value={cards.length ? formatNumber(totalWorkloads) : "—"}
-              sub={<span>{cards.length ? "Across namespaces" : "Connect clusters"}</span>}
+              value={reach.length ? formatNumber(totalWorkloads) : "—"}
+              sub={<span>{reach.length ? "Across namespaces" : "Connect clusters"}</span>}
               tone="info"
             />
             <MetricTile
