@@ -170,6 +170,18 @@ describe("FleetView", () => {
     });
   });
 
+  it("keeps a cluster with incomplete inventory accessible without reporting healthy zeros", async () => {
+    renderFleet([fleetCard({ name: "slow", error: "Inventory incomplete: pods. Open the cluster or retry to load missing data." })]);
+    await userEvent.click(await screen.findByRole("button", { name: /^connect slow$/i }));
+    expect(await screen.findByText(/Inventory incomplete: pods/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "slow" })).toBeEnabled();
+    expect(screen.queryByText("Healthy", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText("0 unhealthy", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText("3/3 ready", { exact: true })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "slow" }));
+    expect(await screen.findByTestId("location")).toHaveTextContent("/cluster/slow");
+  });
+
   it("offers diagnostics on an unreachable card and safely retries", async () => {
     renderFleet([fleetCard({ name: "unreachable", reachable: false, error: "dial tcp refused" })]);
     await userEvent.click(await screen.findByRole("button", { name: /connect unreachable/i }));

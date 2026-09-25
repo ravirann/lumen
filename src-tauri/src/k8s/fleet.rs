@@ -5,7 +5,7 @@
 //! the UI shows these in an "unreachable" bucket rather than erroring the
 //! whole fleet view.
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::k8s::client::K8sState;
 use crate::k8s::kubeconfig;
 use crate::k8s::metrics;
@@ -127,17 +127,26 @@ pub async fn list_nodes(client: &Client, ctx: &str) -> AppResult<Vec<NodeSummary
     Ok(nodes)
 }
 
-/// Hard upper bound on any single fleet probe. An unreachable cluster would
-/// otherwise hang for the TCP connect timeout (often 2 minutes) and block the
-/// whole grid.
+/// Bound credential setup and the lightweight connectivity request separately
+/// from inventory downloads, which can be large even on reachable clusters.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+const INVENTORY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+async fn inventory_read<T>(
+    request: impl std::future::Future<Output = Result<T, kube::Error>>,
+) -> AppResult<T> {
+    tokio::time::timeout(INVENTORY_TIMEOUT, request)
+        .await
+        .map_err(|_| AppError::K8s("inventory request timed out".into()))?
+        .map_err(|e| AppError::K8s(e.to_string()))
+}
 
 /// Cap concurrent context probes so a kubeconfig with 8+ contexts doesn't
 /// fan out to 80+ simultaneous kube list calls (each `probe_one_inner` does
-/// 10 internal parallel calls). Beyond ~6 outer probes we mostly see
+/// 9 internal parallel calls). Beyond ~6 outer probes we mostly see
 /// head-of-line blocking from a single slow context starving the others;
 /// this Semaphore lets healthy contexts complete promptly while stalled ones
-/// run out the 8s probe timeout in the background.
+/// run out bounded connection and inventory deadlines in the background.
 const FLEET_CONCURRENCY: usize = 6;
 
 static FLEET_SEMAPHORE: LazyLock<Arc<Semaphore>> =
@@ -271,15 +280,28 @@ pub fn detect_distribution(nodes: &[Node]) -> Option<String> {
 
 async fn probe_one_inner(state: &K8sState, ctx: ContextInfo) -> FleetCard {
     let fetched_at_ms = chrono::Utc::now().timestamp_millis();
-    let client = match state.client_for(&ctx.name).await {
-        Ok(c) => c,
-        Err(e) => {
-            // Ensure a fresh client build next tick — the cached one, if any,
-            // is known to be broken.
+    let connection = tokio::time::timeout(PROBE_TIMEOUT, async {
+        let client = state.client_for(&ctx.name).await?;
+        let version = client
+            .apiserver_version()
+            .await
+            .map_err(|e| AppError::K8s(e.to_string()))?;
+        Ok::<_, AppError>((client, version))
+    })
+    .await;
+    let (client, version) = match connection {
+        Ok(Ok(connected)) => connected,
+        result => {
             state.invalidate(&ctx.name).await;
-            return unreachable_card(ctx, e.to_string(), fetched_at_ms);
+            let message = match result {
+                Ok(Err(error)) => error.to_string(),
+                Err(_) => format!("connection timed out after {}s", PROBE_TIMEOUT.as_secs()),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            return unreachable_card(ctx, message, fetched_at_ms);
         }
     };
+    let server_version = Some(format!("v{}.{}", version.major, version.minor));
 
     let c0 = client.clone();
     let c1 = client.clone();
@@ -292,38 +314,46 @@ async fn probe_one_inner(state: &K8sState, ctx: ContextInfo) -> FleetCard {
     let c8 = client.clone();
     let ctx_name = ctx.name.clone();
 
-    let (ver, nodes, ns, pods, dep, ss, ds, cj, jobs, node_metrics) = tokio::join!(
-        client.apiserver_version(),
-        async move { Api::<Node>::all(c0).list(&ListParams::default()).await },
-        async move { Api::<Namespace>::all(c1).list(&ListParams::default()).await },
-        async move { Api::<Pod>::all(c2).list(&ListParams::default()).await },
-        async move {
+    let (nodes, ns, pods, dep, ss, ds, cj, jobs, node_metrics) = tokio::join!(
+        inventory_read(async move { Api::<Node>::all(c0).list(&ListParams::default()).await }),
+        inventory_read(async move { Api::<Namespace>::all(c1).list(&ListParams::default()).await }),
+        inventory_read(async move { Api::<Pod>::all(c2).list(&ListParams::default()).await }),
+        inventory_read(async move {
             Api::<Deployment>::all(c3)
                 .list(&ListParams::default())
                 .await
-        },
-        async move {
+        }),
+        inventory_read(async move {
             Api::<StatefulSet>::all(c4)
                 .list(&ListParams::default())
                 .await
-        },
-        async move { Api::<DaemonSet>::all(c5).list(&ListParams::default()).await },
-        async move { Api::<CronJob>::all(c6).list(&ListParams::default()).await },
-        async move { Api::<Job>::all(c7).list(&ListParams::default()).await },
+        }),
+        inventory_read(async move { Api::<DaemonSet>::all(c5).list(&ListParams::default()).await }),
+        inventory_read(async move { Api::<CronJob>::all(c6).list(&ListParams::default()).await }),
+        inventory_read(async move { Api::<Job>::all(c7).list(&ListParams::default()).await }),
         async move { metrics::node_usage(&c8, &ctx_name).await },
     );
-
-    // If apiserver_version failed, we haven't actually talked to the cluster —
-    // every follow-up list call will have failed for the same reason. Treat as
-    // unreachable and evict the cached client so next tick retries from
-    // scratch.
-    let server_version = match &ver {
-        Ok(v) => Some(format!("v{}.{}", v.major, v.minor)),
-        Err(e) => {
-            state.invalidate(&ctx.name).await;
-            return unreachable_card(ctx, e.to_string(), fetched_at_ms);
-        }
-    };
+    // Keep successful reads, but never present missing inventory as a healthy zero.
+    // Fixed resource labels avoid exposing provider error bodies in the UI.
+    let missing: Vec<_> = [
+        ("nodes", nodes.is_err()),
+        ("namespaces", ns.is_err()),
+        ("pods", pods.is_err()),
+        ("deployments", dep.is_err()),
+        ("statefulsets", ss.is_err()),
+        ("daemonsets", ds.is_err()),
+        ("cronjobs", cj.is_err()),
+        ("jobs", jobs.is_err()),
+    ]
+    .into_iter()
+    .filter_map(|(name, failed)| failed.then_some(name))
+    .collect();
+    let error = (!missing.is_empty()).then(|| {
+        format!(
+            "Inventory incomplete: {}. Open the cluster or reconnect to load missing data.",
+            missing.join(", ")
+        )
+    });
 
     let (node_count, node_ready, cpu_cap_milli, mem_cap_bytes) = match &nodes {
         Ok(list) => {
@@ -422,7 +452,7 @@ async fn probe_one_inner(state: &K8sState, ctx: ContextInfo) -> FleetCard {
     FleetCard {
         context: ctx,
         reachable: true,
-        error: None,
+        error,
         server_version,
         node_count,
         node_ready,
@@ -442,23 +472,9 @@ async fn probe_one_inner(state: &K8sState, ctx: ContextInfo) -> FleetCard {
 }
 
 async fn probe_one(state: &K8sState, ctx: ContextInfo) -> FleetCard {
-    let fetched_at_ms = chrono::Utc::now().timestamp_millis();
-    let ctx_name = ctx.name.clone();
-    // Hold a global concurrency permit across the entire probe (including the
-    // timeout wait) so a stuck cluster eats one slot, not many. Acquire is
-    // infallible here — the semaphore is never closed.
+    // Hold one permit for the complete, bounded connection and inventory probe.
     let _permit = FLEET_SEMAPHORE.clone().acquire_owned().await.ok();
-    match tokio::time::timeout(PROBE_TIMEOUT, probe_one_inner(state, ctx.clone())).await {
-        Ok(card) => card,
-        Err(_) => {
-            state.invalidate(&ctx_name).await;
-            unreachable_card(
-                ctx,
-                format!("probe timed out after {}s", PROBE_TIMEOUT.as_secs()),
-                fetched_at_ms,
-            )
-        }
-    }
+    probe_one_inner(state, ctx).await
 }
 
 pub async fn probe_all(state: &K8sState) -> AppResult<Vec<FleetCard>> {

@@ -239,6 +239,7 @@ pub struct FleetHealth {
 pub struct FleetCard {
     pub context: ContextInfo,
     pub reachable: bool,
+    /// Connection failure when unreachable; incomplete inventory warning otherwise.
     pub error: Option<String>,
     pub server_version: Option<String>,
     pub node_count: i32,
