@@ -40,7 +40,14 @@ function Quantities({ values }: { values: Record<string, number | null> }) {
       {Object.entries(values).map(([key, value]) => (
         <li key={key} className="break-words">
           <span className="font-mono">{key}</span>:{" "}
-          <span>{value === null ? "Unknown" : value}</span>
+          <span>
+            {value !== null &&
+            Number.isFinite(value) &&
+            Number.isSafeInteger(value) &&
+            value >= 0
+              ? value
+              : "Unknown"}
+          </span>
         </li>
       ))}
     </ul>

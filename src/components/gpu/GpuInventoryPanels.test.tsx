@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -104,7 +104,9 @@ it("supports arrow-key tabs, advertised slots and metadata", async () => {
   expect(screen.getByRole("tab", { name: "GPU nodes" })).toHaveFocus();
   expect(screen.getByText("Advertised slots")).toBeInTheDocument();
   expect(screen.getByText(/A100/)).toBeInTheDocument();
-  expect(screen.getByRole("link", {name:"worker · DRA device details"})).toHaveAttribute("href", "/cluster/demo/device-resources?ns=&node=worker");
+  expect(
+    screen.getByRole("link", { name: "worker · DRA device details" }),
+  ).toHaveAttribute("href", "/cluster/demo/device-resources?ns=&node=worker");
 });
 it("distinguishes empty, loading and failed sources", async () => {
   const s = snapshot();
@@ -185,4 +187,80 @@ it("uses narrow-layout table scrolling and bounds rendered rows", async () => {
     screen.getByRole("button", { name: "Next GPU workloads page" }),
   );
   expect(screen.getByText("train-50")).toBeInTheDocument();
+});
+
+it.each([
+  ["unsafe integer", Number.MAX_SAFE_INTEGER + 1],
+  ["fractional", 1.5],
+  ["negative", -1],
+  ["infinite", Infinity],
+  ["malformed", "invalid" as unknown as number],
+])(
+  "keeps %s quantities unknown in pod and node rows",
+  async (_label, quantity) => {
+    const s = snapshot();
+    s.pods.items[0].requests = { "nvidia.com/gpu": quantity };
+    s.nodes = {
+      ...s.nodes,
+      state: "available",
+      complete: true,
+      items: [
+        {
+          resource: {
+            api_version: "v1",
+            kind: "Node",
+            namespace: null,
+            name: "worker",
+            uid: "n",
+          },
+          allocatable: { "nvidia.com/gpu": quantity },
+          gpu_labels: {},
+        },
+      ],
+    };
+    vi.mocked(fetchGpuInventory).mockResolvedValue(s);
+    render(<GpuInventoryPanels context="demo" namespace="team" />, { wrapper });
+    const pod = await screen.findByRole("link", { name: "train" });
+    expect(within(pod.closest("tr")!).getByText("Unknown")).toBeInTheDocument();
+    expect(screen.getAllByText("Unknown")).toHaveLength(2);
+    await userEvent.click(screen.getByRole("tab", { name: "GPU nodes" }));
+    const node = screen.getByRole("link", {
+      name: "worker · DRA device details",
+    });
+    expect(
+      within(node.closest("tr")!).getByText("Unknown"),
+    ).toBeInTheDocument();
+  },
+);
+it("never renders rounded native i64 node slots as definite evidence", async () => {
+  const s = snapshot();
+  s.nodes = {
+    ...s.nodes,
+    state: "available",
+    complete: true,
+    items: [
+      {
+        resource: {
+          api_version: "v1",
+          kind: "Node",
+          namespace: null,
+          name: "worker",
+          uid: "n",
+        },
+        allocatable: { "nvidia.com/gpu": Number.MAX_SAFE_INTEGER + 1 },
+        gpu_labels: {},
+      },
+    ],
+  };
+  vi.mocked(fetchGpuInventory).mockResolvedValue(s);
+  render(<GpuInventoryPanels context="demo" namespace="team" />, { wrapper });
+  await screen.findByText("train");
+  await userEvent.click(screen.getByRole("tab", { name: "GPU nodes" }));
+  expect(
+    within(
+      screen
+        .getByRole("link", { name: "worker · DRA device details" })
+        .closest("tr")!,
+    ).getByText("Unknown"),
+  ).toBeInTheDocument();
 });
