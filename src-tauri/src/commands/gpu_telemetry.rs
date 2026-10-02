@@ -51,3 +51,32 @@ pub async fn gpu_telemetry_capabilities(
     .map_err(|_| AppError::K8s("Connecting to the selected context failed.".into()))?;
     gpu_telemetry::capabilities(&client, &config).await
 }
+#[tauri::command]
+pub async fn gpu_telemetry_history(
+    context: String,
+    namespace: Option<String>,
+    window_seconds: u64,
+    end_seconds: f64,
+    state: tauri::State<'_, AppState>,
+) -> AppResult<gpu_telemetry::GpuHistory> {
+    context_required(&context)?;
+    state.gpu_settings.ensure_available()?;
+    let config = state.gpu_settings.get(&context).ok_or_else(|| {
+        AppError::K8s("Configure a telemetry Service for this context first.".into())
+    })?;
+    let client = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.k8s.client_for(&context),
+    )
+    .await
+    .map_err(|_| AppError::K8s("Connecting to the selected context timed out.".into()))?
+    .map_err(|_| AppError::K8s("Connecting to the selected context failed.".into()))?;
+    gpu_telemetry::history(
+        &client,
+        &config,
+        namespace.as_deref(),
+        window_seconds,
+        end_seconds,
+    )
+    .await
+}
