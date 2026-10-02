@@ -69,44 +69,79 @@ pub fn redact_message(message: &str) -> String {
         safe_lines.push(line.to_owned());
     }
     let safe = safe_lines.concat();
-    // Scheduler statements retain punctuation and wording outside credential values.
+    // Consume credential values as spans, so quoted values cannot leak trailing words.
     let mut result = String::new();
-    let mut redact_next = false;
-    for part in safe.split_inclusive(char::is_whitespace) {
-        let word = part.trim_end();
-        let suffix = &part[word.len()..];
-        let lower = word.to_ascii_lowercase();
-        if redact_next {
-            result.push_str("[REDACTED]");
-            result.push_str(suffix);
-            redact_next = false;
+    let mut cursor = 0;
+    while cursor < safe.len() {
+        let first = safe[cursor..].chars().next().unwrap();
+        if first.is_whitespace() {
+            result.push(first);
+            cursor += first.len_utf8();
             continue;
         }
-        let secret = lower.contains("token")
-            || lower.contains("password")
-            || lower.contains("secret")
-            || lower.contains("api_key")
-            || lower.contains("api-key")
-            || lower.contains("client-key-data");
-        if secret {
-            if let Some(i) = word.find(['=', ':']) {
-                result.push_str(&word[..=i]);
-                if i + 1 == word.len() {
-                    redact_next = true;
-                } else {
-                    result.push_str("[REDACTED]");
+        let word_end = safe[cursor..]
+            .find(char::is_whitespace)
+            .map_or(safe.len(), |i| cursor + i);
+        let word = &safe[cursor..word_end];
+        let assignment = word.find(['=', ':']).filter(|&i| {
+            let key = word[..i].to_ascii_lowercase();
+            [
+                "token",
+                "password",
+                "secret",
+                "api_key",
+                "api-key",
+                "client-key-data",
+                "client-certificate-data",
+            ]
+            .iter()
+            .any(|marker| key.contains(marker))
+        });
+        let value_start = if let Some(i) = assignment {
+            result.push_str(&word[..=i]);
+            Some(cursor + i + 1)
+        } else if word.eq_ignore_ascii_case("bearer") {
+            result.push_str(word);
+            result.push(' ');
+            Some(word_end)
+        } else {
+            None
+        };
+        if let Some(mut value_start) = value_start {
+            while value_start < safe.len() {
+                let c = safe[value_start..].chars().next().unwrap();
+                if !c.is_whitespace() {
+                    break;
                 }
-                result.push_str(suffix);
-                continue;
+                value_start += c.len_utf8();
             }
-        }
-        result.push_str(part);
-        if lower == "bearer" {
-            redact_next = true;
+            let mut end = safe.len();
+            if let Some(quote @ ('\'' | '"')) = safe[value_start..].chars().next() {
+                let mut escaped = false;
+                for (offset, c) in safe[value_start + 1..].char_indices() {
+                    if !escaped && c == quote {
+                        end = value_start + 1 + offset + 1;
+                        break;
+                    }
+                    if !escaped && c == '\\' {
+                        escaped = true;
+                    } else {
+                        escaped = false;
+                    }
+                }
+            } else if let Some(offset) = safe[value_start..].find(char::is_whitespace) {
+                end = value_start + offset;
+            }
+            result.push_str("[REDACTED]");
+            cursor = end;
+        } else {
+            result.push_str(word);
+            cursor = word_end;
         }
     }
     result
 }
+
 fn select(v: &Value, keys: &[&str]) -> Value {
     Value::Object(
         keys.iter()
@@ -333,6 +368,15 @@ async fn get_pod(api: &Api<DynamicObject>, name: &str, uid: &str) -> AppResult<V
     ))
 }
 async fn referenced(client: &Client, ns: &str, pod: &Value, claims: bool) -> Source<Value> {
+    referenced_with_limit(client, ns, pod, claims, 10000).await
+}
+async fn referenced_with_limit(
+    client: &Client,
+    ns: &str,
+    pod: &Value,
+    claims: bool,
+    max_refs: usize,
+) -> Source<Value> {
     tokio::time::timeout(SOURCE_TIMEOUT, async {
         let mut s = source();
         let mut names = Vec::new();
@@ -369,6 +413,12 @@ async fn referenced(client: &Client, ns: &str, pod: &Value, claims: bool) -> Sou
         }
         names.sort();
         names.dedup();
+        if names.len() > max_refs {
+            s.complete = false;
+            s.message = Some(
+                "Referenced resource collection truncated at the source request limit.".into(),
+            );
+        }
         let (group, kind, plural, rk) = if claims {
             (
                 "resource.k8s.io",
@@ -385,7 +435,7 @@ async fn referenced(client: &Client, ns: &str, pod: &Value, claims: bool) -> Sou
             )
         };
         let api = api(client, ns, group, kind, plural);
-        for name in names.into_iter().take(10000) {
+        for name in names.into_iter().take(max_refs) {
             match api.get(&name).await {
                 Ok(o) => s
                     .items
@@ -509,6 +559,7 @@ pub async fn snapshot(
 ) -> AppResult<SchedulingSnapshot> {
     let pods = api(client, namespace, "", "Pod", "pods");
     let p = get_pod(&pods, pod, expected_uid).await?;
+    let pod_captured_at = chrono::Utc::now().to_rfc3339();
     let events_api = api(client, namespace, "", "Event", "events");
     let nodes_api = api(client, "", "", "Node", "nodes");
     let (events, nodes, pvcs, claims) = tokio::join!(
@@ -549,6 +600,7 @@ pub async fn snapshot(
         }
     }
     let mut pod_source = source();
+    pod_source.captured_at = pod_captured_at;
     pod_source.items.push(p.clone());
     let sources = HashMap::from([
         ("pod".into(), pod_source),
@@ -785,5 +837,82 @@ mod credential_tests {
             assert!(!out.contains(secret));
         }
         assert!(out.contains("Insufficient gpu"));
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    fn client(s: &MockServer) -> Client {
+        Client::try_from(kube::Config::new(s.uri().parse().unwrap())).unwrap()
+    }
+    #[test]
+    fn inline_quoted_credentials_are_redacted_in_sources_and_explanations() {
+        for value in [
+            "password=\"alpha beta gamma\"",
+            "token: 'alpha beta gamma'",
+            "api_key=\"alpha beta gamma\"",
+        ] {
+            let text = format!(
+                "Insufficient nvidia.com/gpu; scheduler rejected {value}; untolerated taint"
+            );
+            let event = json!({"apiVersion":"v1","kind":"Event","metadata":{"uid":"ev"},"involvedObject":{"uid":"u"},"reason":"FailedScheduling","message":text});
+            let projected = sanitize(event, ResourceKind::Event);
+            let pod = json!({"metadata":{"uid":"u"}});
+            let out=json!({"source":projected,"explanations":explain_pod(&pod,&[projected.clone()],"now")}).to_string();
+            for leaked in ["alpha", "beta", "gamma"] {
+                assert!(!out.contains(leaked), "{out}");
+            }
+            assert!(out.contains("Insufficient nvidia.com/gpu"));
+            assert!(out.contains("untolerated taint"));
+        }
+    }
+    #[tokio::test]
+    async fn direct_reference_limit_reports_truncation() {
+        let server = MockServer::start().await;
+        for name in ["a", "b", "c"] {
+            Mock::given(method("GET")).and(path(format!("/api/v1/namespaces/ns/persistentvolumeclaims/{name}"))).respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":name,"uid":name},"status":{"phase":"Bound"}}))).mount(&server).await;
+        }
+        let pod = json!({"spec":{"volumes":[{"persistentVolumeClaim":{"claimName":"a"}},{"persistentVolumeClaim":{"claimName":"b"}},{"persistentVolumeClaim":{"claimName":"c"}}]}});
+        let source = referenced_with_limit(&client(&server), "ns", &pod, false, 2).await;
+        assert_eq!(source.items.len(), 2);
+        assert_eq!(source.state, SourceState::Available);
+        assert!(!source.complete);
+        assert!(source.message.unwrap().contains("truncated"));
+    }
+    #[tokio::test]
+    async fn pod_source_timestamp_precedes_independent_evidence_requests() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/v1/namespaces/ns/pods/p")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","uid":"u"},"spec":{},"status":{"phase":"Pending"}}))).mount(&server).await;
+        let event_requested = Arc::new(Mutex::new(None));
+        let observed = event_requested.clone();
+        Mock::given(path("/api/v1/namespaces/ns/events"))
+            .respond_with(move |_: &wiremock::Request| {
+                *observed.lock().unwrap() = Some(chrono::Utc::now());
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(40))
+                    .set_body_json(
+                        json!({"apiVersion":"v1","kind":"List","metadata":{},"items":[]}),
+                    )
+            })
+            .mount(&server)
+            .await;
+        Mock::given(path("/api/v1/nodes"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"apiVersion":"v1","kind":"List","metadata":{},"items":[]}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let out = snapshot(&client(&server), "ns", "p", "u").await.unwrap();
+        let captured =
+            chrono::DateTime::parse_from_rfc3339(&out.sources["pod"].captured_at).unwrap();
+        assert!(captured <= event_requested.lock().unwrap().unwrap());
     }
 }
