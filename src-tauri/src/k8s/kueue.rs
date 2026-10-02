@@ -72,7 +72,15 @@ fn supported(r: &Value) -> Option<(&str, &str, &str)> {
         _ => None,
     }
 }
-async fn owners(client: &Client, ns: &str, pod: &Value) -> Result<Vec<ResourceRef>, ()> {
+enum OwnershipError {
+    Relationship,
+    Read(kube::Error),
+}
+async fn owners(
+    client: &Client,
+    ns: &str,
+    pod: &Value,
+) -> Result<Vec<ResourceRef>, OwnershipError> {
     let mut current = pod.clone();
     let mut seen = HashSet::new();
     seen.insert(
@@ -83,20 +91,33 @@ async fn owners(client: &Client, ns: &str, pod: &Value) -> Result<Vec<ResourceRe
     );
     let mut out = vec![];
     for _ in 0..4 {
-        let Some(r) = controller(&current)? else {
+        let Some(r) = controller(&current).map_err(|_| OwnershipError::Relationship)? else {
             return Ok(out);
         };
-        let (g, v, p) = supported(r).ok_or(())?;
-        let name = r["name"].as_str().filter(|s| !s.is_empty()).ok_or(())?;
-        let uid = r["uid"].as_str().filter(|s| !s.is_empty()).ok_or(())?;
+        let (g, v, p) = supported(r).ok_or(OwnershipError::Relationship)?;
+        let name = r["name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or(OwnershipError::Relationship)?;
+        let uid = r["uid"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or(OwnershipError::Relationship)?;
         if !seen.insert(uid.to_owned()) {
-            return Err(());
+            return Err(OwnershipError::Relationship);
         }
-        let object = api(client, ns, g, v, r["kind"].as_str().ok_or(())?, p)
-            .get(name)
-            .await
-            .map_err(|_| ())?;
-        let object = serde_json::to_value(object).map_err(|_| ())?;
+        let object = api(
+            client,
+            ns,
+            g,
+            v,
+            r["kind"].as_str().ok_or(OwnershipError::Relationship)?,
+            p,
+        )
+        .get(name)
+        .await
+        .map_err(OwnershipError::Read)?;
+        let object = serde_json::to_value(object).map_err(|_| OwnershipError::Relationship)?;
         if object.pointer("/metadata/uid").and_then(Value::as_str) != Some(uid)
             || object
                 .pointer("/metadata/namespace")
@@ -105,13 +126,16 @@ async fn owners(client: &Client, ns: &str, pod: &Value) -> Result<Vec<ResourceRe
             || object["kind"] != r["kind"]
             || object["apiVersion"] != r["apiVersion"]
         {
-            return Err(());
+            return Err(OwnershipError::Relationship);
         }
         out.push(resource_ref(&object));
         current = object;
     }
-    if controller(&current)?.is_some() {
-        Err(())
+    if controller(&current)
+        .map_err(|_| OwnershipError::Relationship)?
+        .is_some()
+    {
+        Err(OwnershipError::Relationship)
     } else {
         Ok(out)
     }
@@ -229,6 +253,15 @@ pub async fn admission(
     pod: &Value,
     captured_at: &str,
 ) -> Source<Explanation> {
+    admission_with_deadline(client, namespace, pod, captured_at, Duration::from_secs(15)).await
+}
+async fn admission_with_deadline(
+    client: &Client,
+    namespace: &str,
+    pod: &Value,
+    captured_at: &str,
+    deadline: Duration,
+) -> Source<Explanation> {
     if namespace.is_empty()
         || pod.pointer("/metadata/namespace").and_then(Value::as_str) != Some(namespace)
     {
@@ -239,17 +272,14 @@ pub async fn admission(
         );
         return s;
     }
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        collect(client, namespace, pod, captured_at),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        let mut s = source(captured_at);
-        s.state = SourceState::Error;
-        unknown(&mut s, "Kueue evidence timed out; evidence is incomplete.");
-        s
-    })
+    tokio::time::timeout(deadline, collect(client, namespace, pod, captured_at))
+        .await
+        .unwrap_or_else(|_| {
+            let mut s = source(captured_at);
+            s.state = SourceState::Error;
+            unknown(&mut s, "Kueue evidence timed out; evidence is incomplete.");
+            s
+        })
 }
 async fn collect(client: &Client, ns: &str, pod: &Value, at: &str) -> Source<Explanation> {
     let mut s = source(at);
@@ -275,7 +305,11 @@ async fn collect(client: &Client, ns: &str, pod: &Value, at: &str) -> Source<Exp
     };
     let owners = match owners(client, ns, pod).await {
         Ok(o) => o,
-        Err(()) => {
+        Err(OwnershipError::Read(error)) => {
+            failure(&mut s, error, false);
+            return s;
+        }
+        Err(OwnershipError::Relationship) => {
             unknown(&mut s, "Controller ownership is unresolved or ambiguous.");
             return s;
         }
@@ -620,6 +654,166 @@ mod reader_tests {
             assert_eq!(result.is_ok(), success);
             assert!(s.received_requests().await.unwrap().len() <= 4);
         }
+    }
+    #[tokio::test]
+    async fn kueue_ancestor_read_failures_preserve_source_state_and_scheduling() {
+        for (code, state) in [
+            (403, SourceState::Forbidden),
+            (500, SourceState::Error),
+            (404, SourceState::Error),
+        ] {
+            let server = MockServer::start().await;
+            setup(&server, &["v1beta2"], json!([])).await;
+            Mock::given(path("/apis/batch/v1/namespaces/team/jobs/train"))
+                .respond_with(ResponseTemplate::new(code).set_body_json(json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Failure","code":code,"message":"private error body"})))
+                .with_priority(1).mount(&server).await;
+            let out = admission(&client(&server), "team", &pod(), "now").await;
+            assert_eq!(out.state, state);
+            assert!(!out.complete);
+            let mut selected = pod();
+            selected["status"] = json!({"conditions":[{"type":"PodScheduled","status":"False","message":"Insufficient nvidia.com/gpu"}]});
+            response(&server, "/api/v1/namespaces/team/pods/pod", 200, selected).await;
+            response(
+                &server,
+                "/api/v1/namespaces/team/events",
+                200,
+                json!({"apiVersion":"v1","kind":"List","metadata":{},"items":[]}),
+            )
+            .await;
+            response(
+                &server,
+                "/api/v1/nodes",
+                200,
+                json!({"apiVersion":"v1","kind":"List","metadata":{},"items":[]}),
+            )
+            .await;
+            let integrated =
+                super::super::gpu_scheduling::snapshot(&client(&server), "team", "pod", "pod")
+                    .await
+                    .unwrap();
+            assert_eq!(integrated.sources["kueue"].state, state);
+            assert_eq!(integrated.sources["events"].state, SourceState::Available);
+            assert!(integrated
+                .explanations
+                .iter()
+                .any(|e| e.stage == "scheduling" && e.message.contains("Insufficient")));
+            assert!(!serde_json::to_string(&integrated)
+                .unwrap()
+                .contains("private error body"));
+        }
+    }
+    #[tokio::test]
+    async fn kueue_continuation_and_collection_cap_are_incomplete_when_truncated() {
+        let server = MockServer::start().await;
+        let mut w = workload();
+        w["spec"] = json!({});
+        w["status"] = json!({});
+        setup(&server, &["v1beta2"], json!([])).await;
+        let endpoint = format!("/apis/{GROUP}/v1beta2/namespaces/team/workloads");
+        Mock::given(path(&endpoint)).respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiVersion":"kueue.x-k8s.io/v1beta2","kind":"WorkloadList","metadata":{"continue":"next"},"items":[]}))).with_priority(2).mount(&server).await;
+        Mock::given(path(&endpoint)).and(wiremock::matchers::query_param("continue","next")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiVersion":"kueue.x-k8s.io/v1beta2","kind":"WorkloadList","metadata":{},"items":[w]}))).with_priority(1).mount(&server).await;
+        let out = admission(&client(&server), "team", &pod(), "now").await;
+        assert!(out.complete);
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path() == endpoint)
+                .count(),
+            2
+        );
+        let server = MockServer::start().await;
+        setup(&server, &["v1beta2"], json!([])).await;
+        Mock::given(path(&endpoint)).respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiVersion":"kueue.x-k8s.io/v1beta2","kind":"WorkloadList","metadata":{"continue":"next"},"items":vec![json!({"metadata":{"name":"unrelated","namespace":"team","uid":"u"}});500]}))).with_priority(1).mount(&server).await;
+        let out = admission(&client(&server), "team", &pod(), "now").await;
+        assert!(!out.complete);
+        assert!(out.message.unwrap().contains("truncated"));
+        let requests = server.received_requests().await.unwrap();
+        let pages: Vec<_> = requests
+            .iter()
+            .filter(|r| r.url.path() == endpoint)
+            .collect();
+        assert_eq!(pages.len(), 20);
+        assert!(pages
+            .iter()
+            .all(|r| r.url.query_pairs().any(|(k, v)| k == "limit" && v == "500")));
+    }
+    #[tokio::test]
+    async fn kueue_deadline_covers_discovery_and_ancestor_reads_together() {
+        let server = MockServer::start().await;
+        setup(&server, &["v1beta2"], json!([])).await;
+        Mock::given(path("/apis")).respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(60)).set_body_json(json!({"apiVersion":"v1","kind":"APIGroupList","groups":[{"name":GROUP,"versions":[{"groupVersion":format!("{GROUP}/v1beta2"),"version":"v1beta2"}]}]}))).with_priority(1).mount(&server).await;
+        Mock::given(path("/apis/batch/v1/namespaces/team/jobs/train"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(60))
+                    .set_body_json(object("train", "job", None)),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let out = admission_with_deadline(
+            &client(&server),
+            "team",
+            &pod(),
+            "now",
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(out.state, SourceState::Error);
+        assert!(!out.complete);
+        assert!(out.message.unwrap().contains("timed out"));
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path().ends_with("/jobs/train")));
+        assert!(!server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path().ends_with("/workloads")));
+    }
+    #[tokio::test]
+    async fn kueue_replacement_during_workload_read_invalidates_entire_snapshot() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let server = MockServer::start().await;
+        setup(&server, &["v1beta2"], json!([])).await;
+        let replaced = Arc::new(AtomicBool::new(false));
+        let flag = replaced.clone();
+        Mock::given(path(format!("/apis/{GROUP}/v1beta2/namespaces/team/workloads"))).respond_with(move |_:&wiremock::Request| {flag.store(true,Ordering::SeqCst);ResponseTemplate::new(200).set_body_json(json!({"apiVersion":"kueue.x-k8s.io/v1beta2","kind":"WorkloadList","metadata":{},"items":[]}))}).with_priority(1).mount(&server).await;
+        let flag = replaced.clone();
+        Mock::given(path("/api/v1/namespaces/team/pods/pod"))
+            .respond_with(move |_: &wiremock::Request| {
+                let mut p = pod();
+                if flag.load(Ordering::SeqCst) {
+                    p["metadata"]["uid"] = json!("replacement");
+                }
+                ResponseTemplate::new(200).set_body_json(p)
+            })
+            .mount(&server)
+            .await;
+        for endpoint in ["/api/v1/namespaces/team/events", "/api/v1/nodes"] {
+            response(
+                &server,
+                endpoint,
+                200,
+                json!({"apiVersion":"v1","kind":"List","metadata":{},"items":[]}),
+            )
+            .await;
+        }
+        assert!(matches!(
+            super::super::gpu_scheduling::snapshot(&client(&server), "team", "pod", "pod").await,
+            Err(crate::error::AppError::Conflict(_))
+        ));
+        assert!(replaced.load(Ordering::SeqCst));
     }
     #[test]
     fn kueue_stale_missing_generation_and_other_object_generation() {
