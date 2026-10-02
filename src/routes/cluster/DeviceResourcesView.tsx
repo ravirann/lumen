@@ -38,6 +38,7 @@ import {
   type DeviceObject,
 } from "@/lib/deviceResources";
 import { GpuInventoryPanels } from "@/components/gpu/GpuInventoryPanels";
+import { GpuUsagePanel } from "@/components/gpu/GpuUsagePanel";
 import { cn } from "@/lib/utils";
 
 const collections: {
@@ -95,6 +96,7 @@ export function DeviceResourcesView() {
     params.has("ns") ? params.get("ns") : null,
   );
   const [collection, setCollection] = useState<DeviceCollection>("claims");
+  const [usage, setUsage] = useState(false);
   const [filter, setFilter] = useState("");
   const [inspected, setInspected] = useState<{
     context: string;
@@ -230,7 +232,39 @@ export function DeviceResourcesView() {
         </div>
       )}
       {context && !scope.isLoading && (
-        <GpuInventoryPanels context={context} namespace={scope.namespace} />
+        <>
+          <div
+            role="group"
+            aria-label="GPU view"
+            className="flex flex-wrap gap-2"
+          >
+            <Button
+              size="sm"
+              aria-pressed={!usage}
+              variant={!usage ? "default" : "ghost"}
+              onClick={() => setUsage(false)}
+            >
+              GPU allocation
+            </Button>
+            <Button
+              size="sm"
+              aria-pressed={usage}
+              variant={usage ? "default" : "ghost"}
+              onClick={() => setUsage(true)}
+            >
+              Usage history
+            </Button>
+          </div>
+          {usage ? (
+            <GpuUsagePanel
+              key={context}
+              context={context}
+              namespace={scope.namespace}
+            />
+          ) : (
+            <GpuInventoryPanels context={context} namespace={scope.namespace} />
+          )}
+        </>
       )}
       {data && (
         <>

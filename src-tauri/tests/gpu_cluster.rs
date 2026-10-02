@@ -107,3 +107,97 @@ async fn gpu_inventory_namespace_rbac_terminal_requests_and_redaction() {
     assert_eq!(denied.pods.state, SourceState::Forbidden);
     assert!(denied.pods.items.is_empty());
 }
+
+#[tokio::test]
+#[ignore = "requires disposable scripts/test-kind.sh fixture"]
+async fn gpu_telemetry_proxy_rbac_literal_selectors_gaps_and_bounds() {
+    use lumen_lib::{gpu_settings::GpuTelemetryConfig, k8s::gpu_telemetry};
+    let path = std::env::var("LUMEN_E2E_KUBECONFIG").expect("use scripts/test-kind.sh");
+    let kubeconfig = Kubeconfig::read_from(path).unwrap();
+    assert!(
+        kubeconfig
+            .current_context
+            .as_deref()
+            .unwrap()
+            .starts_with("kind-lumen-e2e-"),
+        "refusing non-fixture context"
+    );
+    let config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(config.cluster_url.host(), Some("127.0.0.1" | "localhost")),
+        "refusing non-local server"
+    );
+    let mut reader_config = config.clone();
+    reader_config.auth_info.impersonate =
+        Some("system:serviceaccount:lumen-e2e-a:telemetry-reader".into());
+    let reader = Client::try_from(reader_config).unwrap();
+    let mut denied_config = config;
+    denied_config.auth_info.impersonate =
+        Some("system:serviceaccount:lumen-e2e-a:telemetry-denied".into());
+    let denied = Client::try_from(denied_config).unwrap();
+    let mut source = GpuTelemetryConfig {
+        namespace: "lumen-e2e-a".into(),
+        service: "gpu-telemetry-fixture".into(),
+        port: "9090".into(),
+        cluster_label: Some("cluster".into()),
+        cluster_value: Some("a\"},evil=\"x\\\n雪".into()),
+        single_cluster_acknowledged: false,
+    };
+    let cap = gpu_telemetry::capabilities(&reader, &source).await.unwrap();
+    assert!(cap.allowed);
+    assert_eq!(cap.available_families.len(), 1);
+    assert!(cap.identity_labels.iter().any(|l| l == "UUID"));
+    let denied_cap = gpu_telemetry::capabilities(&denied, &source).await.unwrap();
+    assert!(!denied_cap.allowed);
+    let end = chrono::Utc::now().timestamp() as f64;
+    let readings = gpu_telemetry::history(&reader, &source, Some("lumen-e2e-a"), 3600, end)
+        .await
+        .unwrap();
+    assert_eq!(
+        readings.series.len(),
+        2,
+        "workload and missing-namespace device histories survive independently"
+    );
+    assert!(readings.series.iter().all(|s| s.points[0].1 == Some(0.0)
+        && s.points[1].1.is_none()
+        && s.points[2].1 == Some(25.0)));
+    assert!(readings
+        .series
+        .iter()
+        .all(|s| s.labels["lumen_cluster_provenance"] == "verified"));
+    assert!(readings
+        .series
+        .iter()
+        .any(|s| s.labels["namespace"].is_empty()));
+    assert!(!serde_json::to_string(&readings)
+        .unwrap()
+        .contains("SECRET_FIXTURE"));
+    assert!(
+        gpu_telemetry::history(&denied, &source, Some("lumen-e2e-a"), 3600, end)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("services/proxy")
+    );
+    let mut other_namespace = source.clone();
+    other_namespace.namespace = "lumen-e2e-b".into();
+    assert!(
+        !gpu_telemetry::capabilities(&reader, &other_namespace)
+            .await
+            .unwrap()
+            .allowed
+    );
+    for limit in ["series-limit", "bytes-limit"] {
+        source.cluster_value = Some(limit.into());
+        let error = gpu_telemetry::history(&reader, &source, Some("lumen-e2e-a"), 3600, end)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("narrower") || error.contains("4 MiB"),
+            "{limit}: {error}"
+        );
+    }
+}

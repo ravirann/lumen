@@ -205,3 +205,16 @@ describe("mapping evidence completeness", () => {
     }
   });
 });
+
+import { normalizeGpuPoint } from "./gpuTelemetry";
+it("retains unsupported chart readings as gaps rather than idle GPUs", () => {
+  expect(normalizeGpuPoint("NaN")).toBeNull();
+  expect(normalizeGpuPoint("+Inf")).toBeNull();
+  expect(normalizeGpuPoint("")).toBeNull();
+  expect(normalizeGpuPoint("0")).toBe(0);
+});
+it("rejects JavaScript-only numeric coercions unsupported by the native parser", () => {
+  expect(normalizeGpuPoint("0x10")).toBeNull();
+  expect(normalizeGpuPoint(" 1 ")).toBeNull();
+  expect(normalizeGpuPoint("1e2")).toBe(100);
+});

@@ -83,3 +83,10 @@ export function attributeGpuSeries(
 }
 
 export { gpuDeviceMappings } from "./gpuTelemetryMapping";
+
+/** Unsupported exporter readings remain chart gaps, never idle measurements. */
+export function normalizeGpuPoint(value: string): number | null {
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(value)) return null;
+  const point = Number(value);
+  return Number.isFinite(point) ? point : null;
+}

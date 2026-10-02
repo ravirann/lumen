@@ -13,6 +13,11 @@ vi.mock("@/lib/gpuInventory", async (original) => ({
   ...(await original<typeof import("@/lib/gpuInventory")>()),
   fetchGpuInventory: vi.fn(),
 }));
+import { getGpuTelemetryConfig } from "@/lib/gpuTelemetry";
+vi.mock("@/lib/gpuTelemetry", async (original) => ({
+  ...(await original<typeof import("@/lib/gpuTelemetry")>()),
+  getGpuTelemetryConfig: vi.fn(),
+}));
 import { k8s } from "@/lib/k8s";
 vi.mock("@/lib/deviceResources", async (original) => ({
   ...(await original<typeof import("@/lib/deviceResources")>()),
@@ -70,6 +75,7 @@ function renderView(path = "/cluster/demo/device-resources?ns=team") {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(getGpuTelemetryConfig).mockResolvedValue(null);
   vi.mocked(fetchGpuInventory).mockResolvedValue({
     namespace: "team",
     captured_at: "now",
@@ -451,4 +457,17 @@ it("keeps GPU workloads usable when DRA APIs are absent", async () => {
     await screen.findByText("No GPU requests observed in this scope."),
   ).toBeInTheDocument();
   expect(fetchGpuInventory).toHaveBeenCalledWith("demo", "team");
+});
+
+it("does not request telemetry before selecting usage and unmounts it on allocation", async () => {
+  renderView();
+  await screen.findByText("Observed namespace requests");
+  expect(getGpuTelemetryConfig).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "Usage history" }));
+  await screen.findByText("Configure existing Prometheus Service");
+  expect(getGpuTelemetryConfig).toHaveBeenCalledWith("demo");
+  await userEvent.click(screen.getByRole("button", { name: "GPU allocation" }));
+  expect(
+    screen.queryByText("Configure existing Prometheus Service"),
+  ).not.toBeInTheDocument();
 });
