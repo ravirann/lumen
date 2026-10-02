@@ -121,3 +121,31 @@ and incident-handoff workflows and their limitations.
 - Secret YAML is redacted by default before rendering.
 - Incident report exports redact obvious tokens, credentials, kubeconfig
   material, and secret values before report construction.
+
+## GPU allocation and optional telemetry
+
+Device resources includes GPU workloads and GPU nodes, with namespace-scoped
+active effective requests, partial/unknown accounting and separate NVIDIA
+GPU/shared/MIG keys. Node advertised slots, requested amounts, DRA allocation
+identities and physical devices remain separate; no free capacity is inferred.
+
+An explicitly selected Usage history view connects to an existing Prometheus
+Service through selected-context Kubernetes service proxy. Setup stores
+non-secret Service fields and exact cluster provenance or an explicitly declared
+single-cluster assumption. Capability and identity coverage precede bounded
+historical charts; missing/nonfinite measurements remain unavailable/gaps.
+History survives disappeared inventory, and current DRA-backed exporter
+associations never establish past allocation or exclusive shared-device usage.
+No background polling, exporter installation or separate telemetry credentials
+are required. See [device resources](DEVICE_RESOURCES.md) for permissions,
+metric units, attribution and limits. Actual NVIDIA dedicated/MIG/sharing hardware
+and exporter compatibility remain unverified pending a real pilot.
+
+GPU pod investigations explain admission, scheduling and startup separately,
+with observed/inferred/unknown confidence, capture time and source completeness
+or access limitations. Optional Kueue v1beta1/v1beta2 membership verifies owner
+UIDs through at most four controller hops. Quota reservation/admission checks do
+not guarantee placement; no queue ETA, position or scheduler simulation is shown.
+Only refreshed evidence matching current context, namespace, pod and UID enters
+incident export, with native and final-report redaction. Actual Kueue controller
+compatibility remains unverified pending a real pilot.

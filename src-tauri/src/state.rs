@@ -6,6 +6,7 @@ use crate::k8s::portforward::ForwardRegistry;
 use std::sync::Arc;
 
 pub struct AppState {
+    pub gpu_settings: Arc<crate::gpu_settings::GpuSettings>,
     pub protection: Arc<crate::protection::ContextProtectionPolicy>,
     pub k8s: Arc<K8sState>,
     pub forwards: Arc<ForwardRegistry>,
@@ -15,6 +16,9 @@ pub struct AppState {
 impl AppState {
     pub fn with_config_dir(path: std::path::PathBuf) -> Self {
         Self {
+            gpu_settings: Arc::new(crate::gpu_settings::GpuSettings::load(
+                path.join("gpu-telemetry.json"),
+            )),
             protection: Arc::new(crate::protection::ContextProtectionPolicy::load(
                 path.join("context-protection.json"),
             )),
@@ -24,6 +28,7 @@ impl AppState {
 
     pub fn new() -> Self {
         Self {
+            gpu_settings: Arc::new(crate::gpu_settings::GpuSettings::unavailable()),
             protection: Arc::new(crate::protection::ContextProtectionPolicy::unavailable()),
             k8s: K8sState::new(),
             forwards: ForwardRegistry::new(),

@@ -2,7 +2,7 @@ import {
   DevicePagination,
   useDevicePagination,
 } from "@/components/devices/DevicePagination";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Cpu, RefreshCw, Search } from "lucide-react";
@@ -37,6 +37,8 @@ import {
   type DeviceCollection,
   type DeviceObject,
 } from "@/lib/deviceResources";
+import { GpuInventoryPanels } from "@/components/gpu/GpuInventoryPanels";
+import { GpuUsagePanel } from "@/components/gpu/GpuUsagePanel";
 import { cn } from "@/lib/utils";
 
 const collections: {
@@ -94,7 +96,10 @@ export function DeviceResourcesView() {
     params.has("ns") ? params.get("ns") : null,
   );
   const [collection, setCollection] = useState<DeviceCollection>("claims");
-  const [filter, setFilter] = useState("");
+  const [usage, setUsage] = useState(false);
+  const [filter, setFilter] = useState(() => params.get("q") ?? "");
+  const requestedFilter = params.get("q") ?? "";
+  useEffect(() => setFilter(requestedFilter), [requestedFilter, context, scope.namespace]);
   const [inspected, setInspected] = useState<{
     context: string;
     namespace: string;
@@ -168,7 +173,7 @@ export function DeviceResourcesView() {
   return (
     <LumenPage>
       <PageHeader
-        eyebrow="Dynamic resource allocation"
+        eyebrow="GPU and dynamic resource allocation"
         title="Device resources"
         icon={<Cpu className="size-3.5" />}
         description="Inspect device requests, driver inventory, and reported workload health."
@@ -227,6 +232,41 @@ export function DeviceResourcesView() {
             </p>
           )}
         </div>
+      )}
+      {context && !scope.isLoading && (
+        <>
+          <div
+            role="group"
+            aria-label="GPU view"
+            className="flex flex-wrap gap-2"
+          >
+            <Button
+              size="sm"
+              aria-pressed={!usage}
+              variant={!usage ? "default" : "ghost"}
+              onClick={() => setUsage(false)}
+            >
+              GPU allocation
+            </Button>
+            <Button
+              size="sm"
+              aria-pressed={usage}
+              variant={usage ? "default" : "ghost"}
+              onClick={() => setUsage(true)}
+            >
+              Usage history
+            </Button>
+          </div>
+          {usage ? (
+            <GpuUsagePanel
+              key={context}
+              context={context}
+              namespace={scope.namespace}
+            />
+          ) : (
+            <GpuInventoryPanels context={context} namespace={scope.namespace} />
+          )}
+        </>
       )}
       {data && (
         <>

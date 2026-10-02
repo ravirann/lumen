@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { k8s, type EventSummary, type ResourceDetail, type WorkloadKind } from "@/lib/k8s";
@@ -8,6 +8,9 @@ import { Button } from "@/components/ui/button";
 import { SectionPanel } from "@/components/lumen/page";
 import { IncidentReportDialog } from "@/components/IncidentReportDialog";
 import { boundLogEvidenceText, captureIncidentLogEvidence, resourceUid, type LogEvidence } from "@/lib/logEvidence";
+
+import { GpuSchedulingPanel } from "@/components/gpu/GpuSchedulingPanel";
+import type { Explanation } from "@/lib/gpuTypes";
 
 type Props = { context: string; issue: TriageIssue; startedAt: string; onClose: () => void };
 const OWNER_KINDS = new Set(["deployment", "replicaset", "statefulset", "daemonset", "job", "cronjob", "replicationcontroller"]);
@@ -52,6 +55,13 @@ function InvestigationSession({ context, issue, startedAt, onClose }: Props) {
   const suggested = [...containers].sort((a, b) => Number(a.ready) - Number(b.ready) || b.restart_count - a.restart_count)[0];
   const container = containers.find((entry) => entry.name === chosenContainer) ?? suggested;
   const uid = resourceUid(resource.data);
+  const schedulingIdentity = JSON.stringify([context, namespace, name, uid]);
+  const [scheduling, setScheduling] = useState<{ identity: string; items: Explanation[] }>();
+  const onSchedulingEvidence = useCallback((items: Explanation[]) => setScheduling({ identity: schedulingIdentity, items }), [schedulingIdentity]);
+  const [schedulingSources, setSchedulingSources] = useState<{ identity: string; lines: string[] }>();
+  const onSchedulingSources = useCallback((lines: string[]) => setSchedulingSources({ identity: schedulingIdentity, lines }), [schedulingIdentity]);
+  const schedulingEnabled = kind === "pod" && !!namespace && !!uid && resource.isSuccess && !resource.isFetching;
+  const schedulingObservations = schedulingEnabled && scheduling?.identity === schedulingIdentity ? scheduling.items.map((item) => `${item.stage} · ${item.confidence} · captured ${item.captured_at}${item.transition_time ? ` · transitioned ${item.transition_time}` : ""}${item.observed_generation != null ? ` · observed generation ${item.observed_generation}` : ""} · ${redactIncidentReportText(item.message)}${item.sources.length ? ` · sources: ${item.sources.map((ref) => `${ref.kind}/${ref.namespace ?? "cluster"}/${ref.name} UID ${ref.uid}`).join(", ")}` : ""}`) : [];
   // A query refresh can change identity or the suggested container without a
   // selection event. Invalidate that capture just as an explicit selection does.
   useEffect(() => {
@@ -72,7 +82,7 @@ function InvestigationSession({ context, issue, startedAt, onClose }: Props) {
   if (kind === "pod" && pod.isSuccess && !container) observations.push("Container log selection unavailable: no containers returned.");
   if (container) observations.push(`Selected container: ${container.name}; ${container.state}; ${container.restart_count} restarts.`);
   for (const event of rolloutEvents) observations.push(`Owner event ${event.involved_kind}/${event.involved_name}: ${event.ts ?? "unknown time"} · ${event.reason} · ${redactIncidentReportText(event.message)}`);
-  const sources = [source("Resource", resource), source("Related events", events), source("Pod containers", pod, kind === "pod" && !!namespace), source("Owner snapshot", ownerQuery, !!owner), source("Controller snapshot", controllerQuery, !!controller), source("Owner events", ownerEvents, !!rolloutTarget)];
+  const sources = [...(schedulingEnabled && schedulingSources?.identity === schedulingIdentity ? schedulingSources.lines : []), source("Resource", resource), source("Related events", events), source("Pod containers", pod, kind === "pod" && !!namespace), source("Owner snapshot", ownerQuery, !!owner), source("Controller snapshot", controllerQuery, !!controller), source("Owner events", ownerEvents, !!rolloutTarget)];
   const loading = resource.isPending || events.isPending || (kind === "pod" && !!namespace && pod.isPending) || (!!owner && ownerQuery.isPending) || (!!controller && controllerQuery.isPending) || (!!rolloutTarget && ownerEvents.isPending);
   function logs(previous: boolean) {
     const params = new URLSearchParams({ ns: namespace, kind: "pod", name, c: container!.name, startedAt });
@@ -104,12 +114,13 @@ function InvestigationSession({ context, issue, startedAt, onClose }: Props) {
         <Button variant="outline" disabled={capturing} onClick={() => void captureLogs()}>{capturing ? "capturing…" : "capture bounded logs"}</Button>
       </div>}
       {logEvidence && <div className="space-y-2 rounded-control border border-border-default p-3"><p className="text-xs text-text-secondary">{logEvidence.note} · max {logEvidence.lineLimit} lines / {logEvidence.charLimit} characters{logEvidence.truncated ? " · truncated" : ""}</p>{logEvidence.status === "captured" && <><textarea aria-label="Log evidence preview" value={logEvidence.text} onChange={(event) => { const text = boundLogEvidenceText(event.target.value); setLogEvidence({ ...logEvidence, text, truncated: logEvidence.truncated || text !== event.target.value }); }} className="h-40 w-full rounded-control border bg-code-surface p-2 font-mono text-xs" /><label className="text-xs"><input type="checkbox" checked={logEvidence.included} onChange={(event) => setLogEvidence({ ...logEvidence, included: event.target.checked })} /> include edited excerpt in export</label></>}</div>}
+      {schedulingEnabled && <GpuSchedulingPanel key={schedulingIdentity} context={context} namespace={namespace} pod={name} expectedUid={uid!} onEvidence={onSchedulingEvidence} onSources={onSchedulingSources} />}
       <div><h3 className="text-sm font-medium text-text-primary">Related events</h3><p className="text-xs text-text-secondary">Fetched for {namespace || "cluster"}/{kind}/{name}; event timestamps are shown below.</p>
         {events.isSuccess && relatedEvents.length === 0 && <p className="text-xs text-text-secondary">No related events returned.</p>}
         <ul className="space-y-1 text-xs text-text-secondary">{relatedEvents.map((event, index) => <li key={index}>{event.ts ?? "unknown time"} · {event.type_} · {event.reason}: {redactIncidentReportText(event.message)}</li>)}</ul>
       </div>
       <div><h3 className="text-sm font-medium text-text-primary">Owner and rollout evidence</h3><ul className="space-y-1 text-xs text-text-secondary">{observations.map((line, index) => <li key={index}>{redactIncidentReportText(line)}</li>)}</ul></div>
     </section>
-    <IncidentReportDialog open={reportOpen} onClose={() => setReportOpen(false)} loading={loading} input={{ clusterContext: context, namespace, selectedResource: issue.resource, triageIssues: [issue], warningEvents: relatedEvents.map((event) => ({ ...event, kind: "Event", involved: `${event.involved_kind}/${event.involved_name}` })), rolloutEntries: [], investigation: { startedAt, sources, observations: [...observations, ...relatedEvents.map((event) => `Related event ${event.ts ?? "unknown time"} · ${event.type_} · ${event.reason}: ${redactIncidentReportText(event.message)}`)], logEvidence } }} />
+    <IncidentReportDialog open={reportOpen} onClose={() => setReportOpen(false)} loading={loading} input={{ clusterContext: context, namespace, selectedResource: issue.resource, triageIssues: [issue], warningEvents: relatedEvents.map((event) => ({ ...event, kind: "Event", involved: `${event.involved_kind}/${event.involved_name}` })), rolloutEntries: [], investigation: { startedAt, sources, observations: [...observations, ...schedulingObservations, ...relatedEvents.map((event) => `Related event ${event.ts ?? "unknown time"} · ${event.type_} · ${event.reason}: ${redactIncidentReportText(event.message)}`)], logEvidence } }} />
   </SectionPanel>;
 }

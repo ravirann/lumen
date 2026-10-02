@@ -100,3 +100,39 @@ mutation permissions. It creates its own local kubeconfig and cluster.
 The kind fixture does not establish NetworkPolicy enforcement by a production
 CNI, Gateway controller behavior, or compatibility with every admission policy.
 Use the network results to choose the next check in the actual environment.
+
+## GPU allocation and low-throughput observations
+
+Compare observed active namespace requests and node advertised slots as
+independent evidence. Unknown quantities, denied reads or partial snapshots
+prevent complete accounting. MIG and shared keys stay separate; shared slots are
+not physical-device counts. A scheduled pod identifies a node rather than an
+exact GPU UUID; inspect DRA claims separately where available.
+
+For measured history, select Usage history and configure/test an existing
+Prometheus Service. Verify capability families and identity coverage first.
+Permission denial requires `get` on `services/proxy` for the configured Service;
+namespace query filters do not constrain authorization inside Prometheus. Failed
+proxy support has no network/authentication fallback. Check Service namespace,
+name and port, exact cluster provenance and supported counters. Narrow the window
+or namespace if response bounds are exceeded.
+
+Missing readings are gaps, not idle GPUs. Device history can outlive pods and
+current inventory. Verified association means exporter identity matches the
+current DRA allocation observation; it cannot establish past allocations or
+exclusive physical consumption. Legacy/name-only, missing or ambiguous mappings
+remain unverified/device-only. Shared activity remains device-level, and XID
+signals do not establish an error count or root cause. These observations do not
+produce optimization or monetary-savings recommendations. Actual NVIDIA
+dedicated/MIG/shared hardware and exporter pilot validation is pending.
+
+Waiting GPU pod investigations separate admission, scheduling and startup and
+show observed/inferred/unknown confidence, capture time and source access/
+completeness. Preserve simultaneous scheduler constraints when comparing DRA,
+PVC and configuration evidence. Kueue v1beta1/v1beta2 membership uses UID-verified
+controller ancestry bounded to four hops; reserved quota or passed admission
+checks do not guarantee placement or supply an ETA/queue position. Only a
+refreshed explanation matching current context/namespace/pod/UID enters incident
+export. Pending or failed refresh and metadata replacement exclude previous
+explanations. Native evidence and final report rendering both redact secrets.
+Real Kueue controller behavior remains unverified pending a pilot.

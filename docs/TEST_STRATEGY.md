@@ -112,3 +112,40 @@ Browser smoke checks can use synthetic Tauri IPC fixtures to inspect layouts
 and route/container selection. These checks complement component tests; they
 do not prove native credential execution or installed-app behavior on macOS,
 Windows, or Linux.
+
+## GPU allocation and optional telemetry coverage
+
+GPU allocation frontend tests cover namespace scope and late responses,
+denied/partial sources, unknown checked sums, unsafe quantities, terminal
+exclusion, separate MIG/shared keys, absent DRA APIs, scoped DRA navigation,
+refresh failure, keyboard tabs, pagination and narrow table scrolling.
+
+Optional usage tests mock IPC for absent configuration, explicit single-cluster
+acknowledgement and exact cluster-label configuration, persistence failure,
+connection denial/removal, missing families and identity labels, historical
+nonfinite gaps, disappeared inventory, shared attribution, bounded-response
+failure, failed-refresh clearing and context/source switches in flight. Route
+coverage checks no telemetry requests before Usage history selection; unmount
+coverage checks no background polling. Pure attribution tests cover exact DRA
+UUID/MIG mapping and conservative ambiguity/sharing handling. Native tests cover
+fixed literal selectors, sanitization, timestamp/unit validation, aggregate
+deadlines, decoded gzip bounds and response/series/point caps.
+
+`scripts/test-kind.sh` creates a disposable local cluster with a temporary
+KUBECONFIG and deletes it on exit. `testdata/k8s/gpu-telemetry.yaml` runs a
+synthetic deterministic HTTP JSON Service, scoped `services/proxy` GET role and
+denied identity. The `gpu_cluster` integration checks permission preflight and
+actual proxy denial, cross-namespace denial, literal cluster selectors,
+workload/device history separation, zero/nonfinite gap retention, private-label
+redaction, 200-series and 4-MiB rejection. It does not contact user clusters or
+install a real NVIDIA/DCGM exporter. Fixtures prove transport and bounded parsing,
+not actual GPU allocation or exporter correctness. Real dedicated NVIDIA, MIG,
+sharing and controller pilot compatibility remains unverified.
+
+Scheduling investigation tests distinguish admission/scheduling/startup,
+observed/inferred/unknown confidence and access/completeness limits. Export tests
+exclude stale explanations after pending/failed refresh, context/scope changes
+and UID replacement, and apply final report redaction. Native tests and isolated
+Kueue CRD fixtures cover v1beta1/v1beta2 adapters, four-hop UID ownership, cycles
+and directly referenced support objects. Synthetic CRDs prove reader behavior,
+not real Kueue controller admission or GPU placement.

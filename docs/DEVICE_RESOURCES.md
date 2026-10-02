@@ -40,8 +40,8 @@ restricted namespace visibility prevent reliable global free-device counts.
 Health comes from matching per-container Kubernetes status reports. Whole-claim
 and individual-request reports are supported. A consuming container without a
 matching report is shown as unknown. Terminated pods can retain old reports.
-Lumen does not probe hardware, infer health from pod readiness, or measure GPU
-utilization. Driver support and cluster feature configuration determine which
+DRA health inspection does not probe hardware, infer health from pod readiness,
+or measure GPU utilization. Optional exporter history is described below. Driver support and cluster feature configuration determine which
 health reports exist.
 
 The inspector displays sanitized JSON, which is also valid YAML syntax. It
@@ -75,3 +75,88 @@ Revert is a local editing action, not cluster rollback. Dry-run does not lock a
 resource against another writer. Existing RBAC, protected-context, confirmation,
 and read-only controls continue to apply. For oversized documents, line comparison
 shows an explicit unavailable notice; the complete draft remains editable.
+
+## GPU workloads and nodes
+
+**GPU allocation** displays independent **GPU workloads** and **GPU nodes**
+views even when DRA APIs are absent. Effective active pod requests are observed
+namespace-scoped totals, with partial sources and unknown quantities visible.
+Terminal pods are excluded. NVIDIA GPU, shared and MIG resource keys stay
+separate from cluster-wide advertised allocatable slots and DRA driver/pool/device
+identities. Shared slots are not physical device counts; no free capacity is
+inferred. A scheduled workload establishes its node relationship, not a GPU UUID.
+Pod links preserve context and namespace; DRA claim and node inventory links
+open the existing device inspection. Reported product/MIG/sharing labels are
+metadata, not hardware measurements.
+
+## Optional usage history
+
+Select **Usage history** to configure an existing Prometheus Service for the
+selected context. Enter Service namespace, name and port, then either an exact
+cluster label/value or an explicit single-cluster acknowledgement. Save the
+source before **Test saved source**; **Remove source** clears its configuration
+and incompatible history. Native settings persist only non-secret source fields.
+No separate credentials, arbitrary URL, PromQL editor, TLS bypass or exporter
+installation is supported.
+
+Kubeconfig credentials access the Service through Kubernetes `services/proxy`
+GET. This permission can expose the Service's entire Prometheus dataset;
+namespace filtering scopes Lumen's queries, not authorization inside Prometheus.
+There is no alternate network/authentication fallback. Connection and persistence
+failures show fixed messages without raw server or credential details.
+
+Capability and identity-label coverage appear before charts. Fixed DCGM families
+include utilization, framebuffer used/total, SM activity, tensor activity and XID
+signals where available. Utilization and profiling values are percentages;
+framebuffer values are bytes. XID values are observations, not error counts or
+root-cause diagnoses. Missing counters remain unavailable; nonfinite readings
+stay gaps instead of becoming idle zeroes. SVG display is downsampled while native
+measurement points remain intact.
+
+Choose 1 hour, 6 hours, 24 hours or 7 days. Each native history operation is
+bounded to 1,000 points per series, 200 series, 4 MiB and 15 seconds. Oversized
+responses fail with narrower-window/scope guidance. Usage requests start on
+entry, window changes or explicit refresh; no timer polling runs after
+navigation away. Context, serialized source, namespace, window and end time
+isolate query results. Failed refresh hides previous readings until a successful
+refresh, and pending results from an old source/context never replace current
+history.
+
+Device history stays visible when live pods, nodes or DRA mappings are absent,
+including device series without a namespace. Selecting a current workload checks
+exporter association without filtering away disappeared-device history. A
+**verified** association requires exact pod UID, namespace, container, node and
+NVIDIA GPU/MIG UUID backed by the current DRA claim/slice mapping and native
+cluster provenance. It does not prove historical allocation or exclusive physical
+usage. Legacy device-plugin/name-only, ambiguous, missing or unsupported mappings
+remain unverified or device-only; shared allocations and shared resource requests
+remain device-only. A single-cluster acknowledgement is a declared unverified
+assumption. Dedicated NVIDIA, MIG and sharing hardware compatibility remains
+unverified until a real pilot is recorded.
+
+## Explaining waiting GPU work
+
+A pod investigation distinguishes admission, scheduling and startup with
+observed, inferred or unknown confidence, capture time and source access/
+completeness. Scheduler messages retain simultaneous constraints; startup uses
+container and init-container state. DRA, PVC and configuration evidence remains
+qualified rather than reproducing scheduler decisions. Optional Kueue
+v1beta1/v1beta2 workload membership verifies referenced UIDs through at most four
+controller hops. Quota reservation and admission checks do not guarantee pod
+placement; no queue ETA/position or scheduling simulation is offered. Actual
+Kueue controller compatibility remains unverified.
+
+Current workload association also includes DRA-only container claim consumers from
+this context and namespace's existing sanitized pod snapshot. Their allocations
+are not added to extended-resource slot totals. Known shared/admin-access DRA
+mappings remain device-only; absent or ambiguous mappings remain unverified.
+Instance-qualified exporter labels (`GPU_I_ID` or `GPU_I_PROFILE`) cannot verify
+association without reconciled instance identity, even alongside a parent GPU UUID.
+Exact full GPU and MIG UUID mappings without these unsupported qualifiers remain
+eligible for current association verification.
+
+History retains original measurement timestamps and values. Query interval
+metadata marks absent evaluations as gaps, splits missing interior intervals, and
+makes Latest unavailable when the final expected evaluation is absent. Setup and
+capability inspection share one 15-second deadline across client setup, permission
+review, and the instant query.

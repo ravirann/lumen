@@ -2557,6 +2557,7 @@ dependencies = [
  "flate2",
  "futures",
  "http",
+ "http-body",
  "k8s-openapi",
  "kube",
  "serde",
