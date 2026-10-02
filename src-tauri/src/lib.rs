@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod error;
+pub mod gpu_settings;
 pub mod k8s;
 pub mod protection;
 pub mod state;
@@ -35,6 +36,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::connection::diagnose_connection,
             commands::devices::device_resources_snapshot,
+            commands::gpu::gpu_scheduling_snapshot,
+            commands::gpu_telemetry::gpu_telemetry_config_get,
+            commands::gpu_telemetry::gpu_telemetry_config_set,
+            commands::gpu_telemetry::gpu_telemetry_capabilities,
             commands::k8s::get_context_protection,
             commands::k8s::set_context_protection,
             commands::k8s::unlock_context,
