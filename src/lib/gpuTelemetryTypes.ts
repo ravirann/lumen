@@ -25,6 +25,7 @@ export type GpuSeries = {
   points: [number, number | null][];
 };
 export type GpuHistory = {
+  interval?: {start: number; end: number; step: number};
   captured_at: string;
   complete: boolean;
   warnings: string[];

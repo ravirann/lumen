@@ -471,3 +471,12 @@ it("does not request telemetry before selecting usage and unmounts it on allocat
     screen.queryByText("Configure existing Prometheus Service"),
   ).not.toBeInTheDocument();
 });
+
+it("consumes the referenced claim query on navigation", async () => {
+  const s = snapshot();
+  s.claims.items = [{metadata: {name: "target", namespace: "team"}}, {metadata: {name: "other", namespace: "team"}}];
+  vi.mocked(fetchDeviceResources).mockResolvedValue(s);
+  renderView("/cluster/demo/device-resources?ns=team&q=target");
+  await screen.findByText("target");
+  expect(screen.queryByText("other")).not.toBeInTheDocument();
+});

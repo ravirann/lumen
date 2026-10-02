@@ -83,23 +83,36 @@ pub fn redact_message(message: &str) -> String {
             .find(char::is_whitespace)
             .map_or(safe.len(), |i| cursor + i);
         let word = &safe[cursor..word_end];
-        let assignment = word.find(['=', ':']).filter(|&i| {
-            let key = word[..i].to_ascii_lowercase();
-            [
-                "token",
-                "password",
-                "secret",
-                "api_key",
-                "api-key",
-                "client-key-data",
-                "client-certificate-data",
-            ]
-            .iter()
-            .any(|marker| key.contains(marker))
+        // Inspect only this key and following whitespace, avoiding scans across prose.
+        let separator = word.find(['=', ':']).map(|i| cursor + i).or_else(|| {
+            let mut next = word_end;
+            while next < safe.len() {
+                let c = safe[next..].chars().next().unwrap();
+                if !c.is_whitespace() {
+                    return matches!(c, '=' | ':').then_some(next);
+                }
+                next += c.len_utf8();
+            }
+            None
+        });
+        let assignment = separator.filter(|&i| {
+            let key = safe[cursor..i].trim().to_ascii_lowercase();
+            !key.chars().any(char::is_whitespace)
+                && [
+                    "token",
+                    "password",
+                    "secret",
+                    "api_key",
+                    "api-key",
+                    "client-key-data",
+                    "client-certificate-data",
+                ]
+                .iter()
+                .any(|marker| key.contains(marker))
         });
         let value_start = if let Some(i) = assignment {
-            result.push_str(&word[..=i]);
-            Some(cursor + i + 1)
+            result.push_str(&safe[cursor..=i]);
+            Some(i + 1)
         } else if word.eq_ignore_ascii_case("bearer") {
             result.push_str(word);
             result.push(' ');
@@ -869,8 +882,11 @@ mod review_tests {
     fn inline_quoted_credentials_are_redacted_in_sources_and_explanations() {
         for value in [
             "password=\"alpha beta gamma\"",
+            "password = \"alpha beta gamma\"",
+            "api_key : \"alpha beta gamma\"",
             "token: 'alpha beta gamma'",
             "api_key=\"alpha beta gamma\"",
+            r#"password = "alpha \"beta\" gamma""#,
         ] {
             let text = format!(
                 "Insufficient nvidia.com/gpu; scheduler rejected {value}; untolerated taint"

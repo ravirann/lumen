@@ -2,7 +2,7 @@ import {
   DevicePagination,
   useDevicePagination,
 } from "@/components/devices/DevicePagination";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Cpu, RefreshCw, Search } from "lucide-react";
@@ -97,7 +97,9 @@ export function DeviceResourcesView() {
   );
   const [collection, setCollection] = useState<DeviceCollection>("claims");
   const [usage, setUsage] = useState(false);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(() => params.get("q") ?? "");
+  const requestedFilter = params.get("q") ?? "";
+  useEffect(() => setFilter(requestedFilter), [requestedFilter, context, scope.namespace]);
   const [inspected, setInspected] = useState<{
     context: string;
     namespace: string;

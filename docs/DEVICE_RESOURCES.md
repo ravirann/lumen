@@ -145,3 +145,18 @@ v1beta1/v1beta2 workload membership verifies referenced UIDs through at most fou
 controller hops. Quota reservation and admission checks do not guarantee pod
 placement; no queue ETA/position or scheduling simulation is offered. Actual
 Kueue controller compatibility remains unverified.
+
+Current workload association also includes DRA-only container claim consumers from
+this context and namespace's existing sanitized pod snapshot. Their allocations
+are not added to extended-resource slot totals. Known shared/admin-access DRA
+mappings remain device-only; absent or ambiguous mappings remain unverified.
+Instance-qualified exporter labels (`GPU_I_ID` or `GPU_I_PROFILE`) cannot verify
+association without reconciled instance identity, even alongside a parent GPU UUID.
+Exact full GPU and MIG UUID mappings without these unsupported qualifiers remain
+eligible for current association verification.
+
+History retains original measurement timestamps and values. Query interval
+metadata marks absent evaluations as gaps, splits missing interior intervals, and
+makes Latest unavailable when the final expected evaluation is absent. Setup and
+capability inspection share one 15-second deadline across client setup, permission
+review, and the instant query.

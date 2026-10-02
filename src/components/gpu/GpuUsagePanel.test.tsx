@@ -242,20 +242,7 @@ it("discards pending history after removing or changing source", async () => {
   ).not.toBeInTheDocument();
 });
 
-it("renders verified current DRA association and degrades ambiguous mapping without losing history", async () => {
-  const pod = {
-    resource: {
-      api_version: "v1",
-      kind: "Pod",
-      namespace: "team",
-      name: "train",
-      uid: "uid",
-    },
-    phase: "Running",
-    node_name: "node",
-    requests: { "nvidia.com/gpu": 1 },
-    owners: [],
-  };
+it("selects DRA-only empty-request consumers and verifies mapping end to end", async () => {
   const source = (items: Record<string, unknown>[]) => ({
     state: "available",
     items,
@@ -351,7 +338,7 @@ it("renders verified current DRA association and degrades ambiguous mapping with
               ],
             }
           : command === "gpu_inventory_snapshot"
-            ? { pods: source([pod]), nodes: source([]), namespace: "team" }
+            ? { pods: source([]), nodes: source([]), namespace: "team" }
             : command === "device_resources_snapshot"
               ? snapshot()
               : null,
@@ -435,4 +422,30 @@ it("rechecks capabilities after saving the same source to recover from denial", 
   await screen.findByText(/Service proxy access unavailable/);
   await userEvent.click(screen.getByRole("button", { name: "Save source" }));
   expect(await screen.findByText("GPU-gone")).toBeInTheDocument();
+});
+
+it("splits absent evaluations and marks trailing disappearance unavailable", async () => {
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => command === "gpu_telemetry_history" ? {
+    ...history, interval: {start: 0, end: 600, step: 100}, series: [{...history.series[0], points: [[0, 10], [400, 50]]}]
+  } : original(command, args));
+  mount();
+  await screen.findByText("GPU-gone");
+  expect(screen.getByText(/5 gaps/)).toBeInTheDocument();
+  expect(screen.getByText(/Latest: Unavailable/)).toBeInTheDocument();
+  expect(document.querySelectorAll("polyline")).toHaveLength(2);
+});
+
+it.each([
+  {points: [[0, 10], [600, 50]], gaps: 5, latest: "50", segments: 2},
+  {points: [[200, 10], [300, 50], [400, 50], [500, 50], [600, 50]], gaps: 2, latest: "50", segments: 1},
+])("represents absent timestamps without changing original observations: %j", async ({points, gaps, latest, segments}) => {
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => command === "gpu_telemetry_history" ? {
+    ...history, interval: {start: 0, end: 600, step: 100}, series: [{...history.series[0], points}]
+  } : original(command, args));
+  mount(); await screen.findByText("GPU-gone");
+  expect(screen.getByText(new RegExp(`${gaps} gaps`))).toBeInTheDocument();
+  expect(screen.getByText(new RegExp(`Latest: ${latest}`))).toBeInTheDocument();
+  expect(document.querySelectorAll("polyline")).toHaveLength(segments);
 });

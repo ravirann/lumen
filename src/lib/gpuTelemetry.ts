@@ -67,6 +67,8 @@ export function attributeGpuSeries(
     l.container &&
     l.UUID &&
     (l.node || l.Hostname) &&
+    !("GPU_I_ID" in l) &&
+    !("GPU_I_PROFILE" in l) &&
     (!l.node || l.node === pod.node_name) &&
     (!l.Hostname || l.Hostname === pod.node_name)
   ) {
@@ -76,7 +78,7 @@ export function attributeGpuSeries(
         m.container === l.container &&
         m.node === pod.node_name,
     );
-    if (matches.length === 1) return "verified";
+    if (matches.length === 1) return matches[0].shared ? "device-only" : "verified";
   }
   // Exporter association is verified against current mapping only; history is not allocation proof.
   return "unverified";

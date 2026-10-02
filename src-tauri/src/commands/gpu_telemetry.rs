@@ -42,14 +42,15 @@ pub async fn gpu_telemetry_capabilities(
     let config = state.gpu_settings.get(&context).ok_or_else(|| {
         AppError::K8s("Configure a telemetry Service for this context first.".into())
     })?;
-    let client = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        state.k8s.client_for(&context),
-    )
+    capability_deadline(gpu_telemetry::REQUEST_TIMEOUT, async {
+        let client = state
+            .k8s
+            .client_for(&context)
+            .await
+            .map_err(|_| AppError::K8s("Connecting to the selected context failed.".into()))?;
+        gpu_telemetry::capabilities(&client, &config).await
+    })
     .await
-    .map_err(|_| AppError::K8s("Connecting to the selected context timed out.".into()))?
-    .map_err(|_| AppError::K8s("Connecting to the selected context failed.".into()))?;
-    gpu_telemetry::capabilities(&client, &config).await
 }
 #[tauri::command]
 pub async fn gpu_telemetry_history(
@@ -94,9 +95,29 @@ async fn history_deadline<T>(
             )
         })?
 }
+async fn capability_deadline<T>(
+    duration: std::time::Duration,
+    operation: impl std::future::Future<Output = AppResult<T>>,
+) -> AppResult<T> {
+    tokio::time::timeout(duration, operation).await.map_err(|_| AppError::K8s(
+        "Telemetry capability request timed out after 15 seconds, including connection setup and access review.".into()
+    ))?
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn gpu_capability_deadline_spans_client_review_and_query() {
+        let result = capability_deadline(std::time::Duration::from_millis(20), async {
+            // Each phase meets its own budget; the composed operation does not.
+            for _ in 0..3 {
+                tokio::time::sleep(std::time::Duration::from_millis(9)).await;
+            }
+            Ok(())
+        })
+        .await;
+        assert!(result.unwrap_err().to_string().contains("15 seconds"));
+    }
     #[tokio::test]
     async fn gpu_history_deadline_spans_setup_and_query() {
         let result = history_deadline(std::time::Duration::from_millis(20), async {

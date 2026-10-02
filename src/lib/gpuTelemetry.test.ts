@@ -128,11 +128,11 @@ describe("DRA-backed association", () => {
     s.slices.items.push(s.slices.items[0]);
     expect(attributeGpuSeries(mappedSeries, pod, false, s)).toBe("unverified");
   });
-  it("keeps shared allocations unverified", () => {
+  it("keeps known shared allocations device-only", () => {
     const s = mappingFixture();
     const c = s.claims.items[0] as any;
     c.status.allocation.devices.results[0].shareID = "shared";
-    expect(attributeGpuSeries(mappedSeries, pod, false, s)).toBe("unverified");
+    expect(attributeGpuSeries(mappedSeries, pod, false, s)).toBe("device-only");
   });
   it("requires reserved UID and matching container request", () => {
     for (const change of ["uid", "request"]) {
@@ -193,14 +193,14 @@ describe("mapping evidence completeness", () => {
     (s.slices.items[0] as any).spec.nodeName = "other";
     expect(attributeGpuSeries(mappedSeries, pod, false, s)).toBe("unverified");
   });
-  it("does not accept noncore reservations or admin access", () => {
+  it("rejects noncore reservations and labels known admin access device-only", () => {
     for (const field of ["apiGroup", "adminAccess"]) {
       const s = mappingFixture();
       const c = s.claims.items[0] as any;
       if (field === "apiGroup") c.status.reservedFor[0].apiGroup = "foreign";
       else c.status.allocation.devices.results[0].adminAccess = true;
       expect(attributeGpuSeries(mappedSeries, pod, false, s)).toBe(
-        "unverified",
+        field === "adminAccess" ? "device-only" : "unverified",
       );
     }
   });
@@ -217,4 +217,30 @@ it("rejects JavaScript-only numeric coercions unsupported by the native parser",
   expect(normalizeGpuPoint("0x10")).toBeNull();
   expect(normalizeGpuPoint(" 1 ")).toBeNull();
   expect(normalizeGpuPoint("1e2")).toBe(100);
+});
+
+it.each<Record<string, string>>([{GPU_I_ID: "7"}, {GPU_I_PROFILE: "1g.5gb"}, {GPU_I_ID: "7", GPU_I_PROFILE: "1g.5gb"}])("rejects unreconciled instance qualifiers %j", (qualifiers) => {
+  expect(attributeGpuSeries({...mappedSeries, labels: {...mappedSeries.labels, ...qualifiers}}, pod, false, mappingFixture())).toBe("unverified");
+});
+
+it("rejects conflicting qualifiers even with an exact MIG UUID", () => {
+  const s = mappingFixture();
+  const attrs = (s.slices.items[0] as any).spec.devices[0].attributes;
+  attrs.type.string = "mig"; attrs.uuid.string = "MIG-1";
+  expect(attributeGpuSeries({...mappedSeries, labels: {...mappedSeries.labels, UUID: "MIG-1", GPU_I_ID: "7", GPU_I_PROFILE: "conflicting"}}, pod, false, s)).toBe("unverified");
+});
+it("unknown shared identity remains unverified", () => {
+  const s = mappingFixture();
+  (s.claims.items[0] as any).status.allocation.devices.results[0].shareID = "shared";
+  expect(attributeGpuSeries({...mappedSeries, labels: {...mappedSeries.labels, UUID: "GPU-unknown"}}, pod, false, s)).toBe("unverified");
+});
+
+import { draUsagePods } from "./gpuTelemetryMapping";
+it("DRA candidates require available same-namespace UID-scoped sanitized pods", () => {
+  const s = mappingFixture();
+  expect(draUsagePods(s)).toMatchObject([{resource: {uid: "u1"}, requests: {}}]);
+  s.namespace = "other";
+  expect(draUsagePods(s)).toEqual([]);
+  s.namespace = "team"; s.pods.state = "forbidden";
+  expect(draUsagePods(s)).toEqual([]);
 });

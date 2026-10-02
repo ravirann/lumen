@@ -9,6 +9,7 @@ export type GpuDeviceMapping = {
   uuid: string;
   node: string;
   container: string;
+  shared: boolean;
 };
 /** Current DRA mapping validates exporter association, never past allocation/exclusivity. */
 export function gpuDeviceMappings(
@@ -102,13 +103,15 @@ export function gpuDeviceMappings(
     )) {
       if (
         r.driver !== "gpu.nvidia.com" ||
-        (r.adminAccess != null && r.adminAccess !== false) ||
-        r.shareID != null ||
-        r.shared === true ||
         !string(r.request)
       )
         continue;
+      const shared =
+        (r.adminAccess != null && r.adminAccess !== false) ||
+        r.shareID != null ||
+        r.shared === true;
       if (
+        !shared &&
         allResults.filter(
           (x) =>
             x.driver === r.driver && x.pool === r.pool && x.device === r.device,
@@ -140,8 +143,34 @@ export function gpuDeviceMappings(
         uuid: t.uuid,
         node: t.node,
         container: string(users[0].name),
+        shared,
       });
     }
   }
   return mappings;
+}
+
+/** Association candidates reuse the sanitized DRA projection, without adding claim counts to slots. */
+export function draUsagePods(snapshot: DeviceSnapshot): GpuPod[] {
+  if (snapshot.pods.state !== "available") return [];
+  return snapshot.pods.items.flatMap((p) => {
+    const m = object(p.metadata), spec = object(p.spec);
+    const containers = ["containers", "initContainers", "ephemeralContainers"]
+      .flatMap(k => objects(spec[k]));
+    if (
+      m.namespace !== snapshot.namespace ||
+      !string(m.uid) || !string(m.name) ||
+      !objects(spec.resourceClaims).length ||
+      !containers.some(c => objects(object(c.resources).claims).length)
+    ) return [];
+    return [{
+      resource: {
+        api_version: "v1", kind: "Pod", namespace: snapshot.namespace,
+        name: string(m.name), uid: string(m.uid),
+      },
+      phase: string(object(p.status).phase),
+      node_name: string(spec.nodeName) || null,
+      requests: {}, owners: [],
+    }];
+  });
 }

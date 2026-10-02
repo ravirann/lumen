@@ -512,7 +512,7 @@ mod reader_tests {
         json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"pod","uid":"pod","namespace":"team","ownerReferences":[reference("train","job")]}})
     }
     fn workload() -> Value {
-        json!({"apiVersion":"kueue.x-k8s.io/v1beta2","kind":"Workload","metadata":{"name":"w","namespace":"team","uid":"w","generation":3,"ownerReferences":[reference("train","job")]},"spec":{"queueName":"local"},"status":{"conditions":[{"type":"QuotaReserved","status":"False","observedGeneration":3,"message":"quota exhausted password=\"private secret\""}],"admissionChecks":[{"name":"check","state":"Pending","message":"await approval"}],"admission":{"clusterQueue":"cluster","podSetAssignments":[{"name":"main","flavors":{"nvidia.com/gpu":"gpu"}}]}}})
+        json!({"apiVersion":"kueue.x-k8s.io/v1beta2","kind":"Workload","metadata":{"name":"w","namespace":"team","uid":"w","generation":3,"ownerReferences":[reference("train","job")]},"spec":{"queueName":"local"},"status":{"conditions":[{"type":"QuotaReserved","status":"False","observedGeneration":3,"message":"quota exhausted password = \"private secret\""}],"admissionChecks":[{"name":"check","state":"Pending","message":"await approval"}],"admission":{"clusterQueue":"cluster","podSetAssignments":[{"name":"main","flavors":{"nvidia.com/gpu":"gpu"}}]}}})
     }
     async fn setup(s: &MockServer, versions: &[&str], workloads: Value) {
         response(s,"/apis",200,json!({"apiVersion":"v1","kind":"APIGroupList","groups":[{"name":GROUP,"versions":versions.iter().map(|v|json!({"groupVersion":format!("{GROUP}/{v}"),"version":v})).collect::<Vec<_>>()}]})).await;

@@ -406,10 +406,17 @@ pub struct GpuSeries {
 }
 #[derive(Debug, Serialize)]
 pub struct GpuHistory {
+    pub interval: GpuHistoryInterval,
     pub captured_at: String,
     pub complete: bool,
     pub warnings: Vec<String>,
     pub series: Vec<GpuSeries>,
+}
+#[derive(Debug, Serialize)]
+pub struct GpuHistoryInterval {
+    pub start: f64,
+    pub end: f64,
+    pub step: u64,
 }
 fn history_overflow() -> AppError {
     AppError::K8s(
@@ -614,6 +621,11 @@ pub async fn history(
         );
     }
     Ok(GpuHistory {
+        interval: GpuHistoryInterval {
+            start,
+            end,
+            step: window.div_ceil(999),
+        },
         captured_at: now.to_rfc3339(),
         complete: true,
         warnings,
@@ -721,6 +733,10 @@ mod history_transport_tests {
             Mock::given(method("GET")).and(path("/api/v1/namespaces/m/services/p:90/proxy/api/v1/query_range")).and(query_param("query",history_query(&c,Some(scope)))).and(query_param("step","4")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"success","data":{"resultType":"matrix","result":[{"metric":{"__name__":"DCGM_FI_DEV_GPU_UTIL","namespace":scope,"UUID":id},"values":[[end,"NaN"]]}]}}))).expect(1).mount(&server).await;
         }
         let h = history(&client, &c, Some("team"), 3600, end).await.unwrap();
+        assert_eq!(h.interval.start, end - 3600.0);
+        assert_eq!(h.interval.end, end);
+        assert_eq!(h.interval.step, 4);
+        assert!(h.series.iter().all(|s| s.points == vec![(end, None)]));
         assert_eq!(h.series.len(), 2);
         assert!(h
             .series

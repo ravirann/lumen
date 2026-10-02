@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { SectionPanel } from "@/components/lumen/page";
 import { Button } from "@/components/ui/button";
 import { fetchDeviceResources } from "@/lib/deviceResources";
+import { draUsagePods } from "@/lib/gpuTelemetryMapping";
 import { fetchGpuInventory } from "@/lib/gpuInventory";
 import {
   attributeGpuSeries,
@@ -120,19 +121,25 @@ function ConfiguredUsage({
     queryKey: ["gpu-telemetry", "mapping", context, source, namespace],
     queryFn: () => fetchDeviceResources(context, namespace),
   });
-  const pods =
+  const inventoryPods =
     !inventory.isError &&
     !inventory.isFetching &&
     inventory.data?.pods.state === "available"
       ? inventory.data.pods.items
       : [];
-  const pod = pods.find((p) => p.resource.uid === podUid);
   const mapping =
     !devices.isError &&
     !devices.isFetching &&
     devices.data?.namespace === namespace
       ? devices.data
       : undefined;
+  const pods = [
+    ...inventoryPods,
+    ...(mapping ? draUsagePods(mapping).filter(p =>
+      !inventoryPods.some(existing => existing.resource.uid === p.resource.uid),
+    ) : []),
+  ];
+  const pod = pods.find((p) => p.resource.uid === podUid);
   const available = capability.isError ? undefined : capability.data;
   const data = history.isError ? undefined : history.data;
   return (
@@ -269,6 +276,7 @@ function ConfiguredUsage({
               <Metric
                 key={i}
                 series={series}
+                interval={data.interval}
                 attribution={
                   pod
                     ? attributeGpuSeries(
@@ -292,7 +300,9 @@ function ConfiguredUsage({
 function Metric({
   series,
   attribution,
+  interval,
 }: {
+  interval?: { start: number; end: number; step: number };
   series: GpuSeries;
   attribution: string;
 }) {
@@ -302,19 +312,26 @@ function Metric({
   );
   const min = Math.min(...finite.map((p) => p[1]));
   const max = Math.max(...finite.map((p) => p[1]));
-  const start = points[0]?.[0] ?? 0;
-  const end = points[points.length - 1]?.[0] ?? start;
+  const start = interval?.start ?? points[0]?.[0] ?? 0;
+  const end = interval?.end ?? points[points.length - 1]?.[0] ?? start;
   // Downsample only SVG display; native measurement points stay intact. Gaps split segments.
   const stride = Math.max(1, Math.ceil(points.length / 250));
   const segments: string[] = [];
   let segment: string[] = [];
   points.forEach(([time, value], i) => {
+    if (interval && i > 0 && time - points[i - 1][0] > interval.step + 1e-6) {
+      if (segment.length) segments.push(segment.join(" "));
+      segment = [];
+    }
     if (value === null || !Number.isFinite(value)) {
       if (segment.length) segments.push(segment.join(" "));
       segment = [];
       return;
     }
-    if (i % stride === 0 || i === points.length - 1) {
+    if (
+      !segment.length || i % stride === 0 || i === points.length - 1 ||
+      (interval && points[i + 1]?.[0] - time > interval.step + 1e-6)
+    ) {
       segment.push(
         `${end === start ? 0 : ((time - start) / (end - start)) * 300},${max === min ? 30 : 55 - ((value - min) / (max - min)) * 50}`,
       );
@@ -326,7 +343,18 @@ function Metric({
     : series.family === "xid_errors"
       ? "XID signal"
       : "%";
-  const gaps = points.length - finite.length;
+  const evaluations = interval
+    ? Math.min(1000, Math.floor((interval.end - interval.start) / interval.step) + 1)
+    : points.length;
+  const gaps = Math.max(0, evaluations - finite.length);
+  const lastEvaluation = interval
+    ? interval.start + (evaluations - 1) * interval.step
+    : end;
+  const latest = points[points.length - 1];
+  const latestValue =
+    latest && Math.abs(latest[0] - lastEvaluation) <= 1e-6 &&
+    latest[1] !== null && Number.isFinite(latest[1])
+      ? latest[1] : "Unavailable";
   return (
     <div className="rounded-control border border-border-subtle p-3">
       <h3 className="break-words text-sm font-medium">
@@ -360,7 +388,7 @@ function Metric({
         ))}
       </svg>
       <p className="text-xs">
-        Latest: {points[points.length - 1]?.[1] ?? "Unavailable"} {unit} ·
+        Latest: {latestValue} {unit} ·
         Range: {finite.length ? `${min}–${max} ${unit}` : "Unavailable"}
       </p>
     </div>
