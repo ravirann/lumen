@@ -37,6 +37,7 @@ import {
   type DeviceCollection,
   type DeviceObject,
 } from "@/lib/deviceResources";
+import { GpuInventoryPanels } from "@/components/gpu/GpuInventoryPanels";
 import { cn } from "@/lib/utils";
 
 const collections: {
@@ -168,7 +169,7 @@ export function DeviceResourcesView() {
   return (
     <LumenPage>
       <PageHeader
-        eyebrow="Dynamic resource allocation"
+        eyebrow="GPU and dynamic resource allocation"
         title="Device resources"
         icon={<Cpu className="size-3.5" />}
         description="Inspect device requests, driver inventory, and reported workload health."
@@ -227,6 +228,9 @@ export function DeviceResourcesView() {
             </p>
           )}
         </div>
+      )}
+      {context && !scope.isLoading && (
+        <GpuInventoryPanels context={context} namespace={scope.namespace} />
       )}
       {data && (
         <>

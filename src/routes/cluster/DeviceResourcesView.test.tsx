@@ -8,6 +8,11 @@ import {
   fetchDeviceResources,
   type DeviceSnapshot,
 } from "@/lib/deviceResources";
+import { fetchGpuInventory } from "@/lib/gpuInventory";
+vi.mock("@/lib/gpuInventory", async (original) => ({
+  ...(await original<typeof import("@/lib/gpuInventory")>()),
+  fetchGpuInventory: vi.fn(),
+}));
 import { k8s } from "@/lib/k8s";
 vi.mock("@/lib/deviceResources", async (original) => ({
   ...(await original<typeof import("@/lib/deviceResources")>()),
@@ -65,6 +70,24 @@ function renderView(path = "/cluster/demo/device-resources?ns=team") {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(fetchGpuInventory).mockResolvedValue({
+    namespace: "team",
+    captured_at: "now",
+    pods: {
+      state: "available",
+      complete: true,
+      captured_at: "now",
+      items: [],
+      message: null,
+    },
+    nodes: {
+      state: "available",
+      complete: true,
+      captured_at: "now",
+      items: [],
+      message: null,
+    },
+  });
   vi.mocked(k8s.listNamespaces).mockResolvedValue(["team", "other"]);
   vi.mocked(k8s.listContexts).mockResolvedValue([]);
   vi.mocked(fetchDeviceResources).mockResolvedValue(snapshot());
@@ -414,4 +437,18 @@ describe("DeviceResourcesView", () => {
       screen.queryByText("No claims found in this scope."),
     ).not.toBeInTheDocument();
   });
+});
+
+it("keeps GPU workloads usable when DRA APIs are absent", async () => {
+  const s = snapshot();
+  s.claims = { state: "unsupported", items: [], message: null };
+  vi.mocked(fetchDeviceResources).mockResolvedValue(s);
+  renderView();
+  expect(
+    await screen.findByText("Claims: API not served by this cluster."),
+  ).toBeInTheDocument();
+  expect(
+    await screen.findByText("No GPU requests observed in this scope."),
+  ).toBeInTheDocument();
+  expect(fetchGpuInventory).toHaveBeenCalledWith("demo", "team");
 });
