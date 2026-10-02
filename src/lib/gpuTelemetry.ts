@@ -1,3 +1,5 @@
+import { gpuDeviceMappings } from "./gpuTelemetryMapping";
+import type { DeviceSnapshot } from "./deviceResources";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   GpuTelemetryConfig,
@@ -46,6 +48,7 @@ export function attributeGpuSeries(
   series: GpuSeries,
   pod: GpuPod,
   shared: boolean,
+  snapshot?: DeviceSnapshot,
 ): "verified" | "unverified" | "device-only" {
   const l = series.labels;
   if (
@@ -56,7 +59,27 @@ export function attributeGpuSeries(
   )
     return "device-only";
   if (!l.pod && !l.pod_uid) return "device-only";
-  // Inventory currently has no authoritative device/container allocation mapping.
-  // Exporter labels alone cannot establish an exclusive device-to-pod association.
+  if (
+    snapshot &&
+    l.lumen_cluster_provenance === "verified" &&
+    l.pod_uid === pod.resource.uid &&
+    l.namespace === pod.resource.namespace &&
+    l.container &&
+    l.UUID &&
+    (l.node || l.Hostname) &&
+    (!l.node || l.node === pod.node_name) &&
+    (!l.Hostname || l.Hostname === pod.node_name)
+  ) {
+    const matches = gpuDeviceMappings(pod, snapshot).filter(
+      (m) =>
+        m.uuid === l.UUID &&
+        m.container === l.container &&
+        m.node === pod.node_name,
+    );
+    if (matches.length === 1) return "verified";
+  }
+  // Exporter association is verified against current mapping only; history is not allocation proof.
   return "unverified";
 }
+
+export { gpuDeviceMappings } from "./gpuTelemetryMapping";

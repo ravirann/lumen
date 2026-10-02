@@ -163,7 +163,7 @@ pub async fn capabilities(
             .as_array()
             .ok_or_else(invalid_history)?;
         if results.len() > 200 {
-            return Err(invalid_history());
+            return Err(history_overflow());
         }
         for item in results {
             let labels = item["metric"].as_object().ok_or_else(invalid_history)?;
@@ -411,6 +411,12 @@ pub struct GpuHistory {
     pub warnings: Vec<String>,
     pub series: Vec<GpuSeries>,
 }
+fn history_overflow() -> AppError {
+    AppError::K8s(
+        "Telemetry history exceeded bounded limits; choose a narrower window or namespace scope."
+            .into(),
+    )
+}
 fn invalid_history() -> AppError {
     AppError::K8s("Telemetry history response is invalid or exceeds bounded limits.".into())
 }
@@ -449,7 +455,7 @@ fn parse_series(
     end: f64,
 ) -> AppResult<Vec<GpuSeries>> {
     if bytes.len() > RESPONSE_LIMIT {
-        return Err(invalid_history());
+        return Err(history_overflow());
     }
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| invalid_history())?;
     if value["status"] != "success" || value["data"]["resultType"] != "matrix" {
@@ -459,7 +465,7 @@ fn parse_series(
         .as_array()
         .ok_or_else(invalid_history)?;
     if results.len() > 200 {
-        return Err(invalid_history());
+        return Err(history_overflow());
     }
     results
         .iter()
@@ -512,7 +518,7 @@ fn parse_series(
             );
             let values = s["values"].as_array().ok_or_else(invalid_history)?;
             if values.len() > 1000 {
-                return Err(invalid_history());
+                return Err(history_overflow());
             }
             let mut last = None;
             let mut points = Vec::new();
@@ -577,7 +583,7 @@ pub async fn history(
             let bytes = proxy_get(client, config, &suffix).await?;
             bytes_total += bytes.len();
             if bytes_total > RESPONSE_LIMIT {
-                return Err(invalid_history());
+                return Err(history_overflow());
             }
             let parsed = parse_series(&bytes, config, start, end)?;
             // Enforce requested namespace again even if a backend ignored its selector.
@@ -591,7 +597,7 @@ pub async fn history(
             }
             series.extend(parsed);
             if series.len() > 200 {
-                return Err(invalid_history());
+                return Err(history_overflow());
             }
         }
         Ok(series)
@@ -673,7 +679,10 @@ mod history_bounds_tests {
         let c = config();
         let item = serde_json::json!({"metric":{"__name__":FAMILIES[0].1},"values":[]});
         let bytes=serde_json::to_vec(&serde_json::json!({"status":"success","data":{"resultType":"matrix","result":vec![item;201]}})).unwrap();
-        assert!(parse_series(&bytes, &c, 0.0, 2.0).is_err());
+        assert!(parse_series(&bytes, &c, 0.0, 2.0)
+            .unwrap_err()
+            .to_string()
+            .contains("narrower window or namespace scope"));
         let s = parse_series(
             &response(FAMILIES[3].1, serde_json::json!([[1, "0.5"]])),
             &c,
@@ -683,7 +692,7 @@ mod history_bounds_tests {
         .unwrap();
         assert_eq!(s[0].points[0].1, Some(50.0));
         for w in [3600_u64, 21600, 86400, 604800] {
-            assert!(w / w.div_ceil(999) + 1 <= 1000);
+            assert!(w / w.div_ceil(999) < 1000);
         }
     }
 }

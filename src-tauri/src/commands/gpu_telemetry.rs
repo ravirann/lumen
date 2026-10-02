@@ -64,19 +64,47 @@ pub async fn gpu_telemetry_history(
     let config = state.gpu_settings.get(&context).ok_or_else(|| {
         AppError::K8s("Configure a telemetry Service for this context first.".into())
     })?;
-    let client = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        state.k8s.client_for(&context),
-    )
+    history_deadline(gpu_telemetry::REQUEST_TIMEOUT, async {
+        let client = state
+            .k8s
+            .client_for(&context)
+            .await
+            .map_err(|_| AppError::K8s("Connecting to the selected context failed.".into()))?;
+        gpu_telemetry::history(
+            &client,
+            &config,
+            namespace.as_deref(),
+            window_seconds,
+            end_seconds,
+        )
+        .await
+    })
     .await
-    .map_err(|_| AppError::K8s("Connecting to the selected context timed out.".into()))?
-    .map_err(|_| AppError::K8s("Connecting to the selected context failed.".into()))?;
-    gpu_telemetry::history(
-        &client,
-        &config,
-        namespace.as_deref(),
-        window_seconds,
-        end_seconds,
-    )
-    .await
+}
+async fn history_deadline<T>(
+    duration: std::time::Duration,
+    operation: impl std::future::Future<Output = AppResult<T>>,
+) -> AppResult<T> {
+    tokio::time::timeout(duration, operation)
+        .await
+        .map_err(|_| {
+            AppError::K8s(
+                "Telemetry history request timed out after 15 seconds, including connection setup."
+                    .into(),
+            )
+        })?
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn gpu_history_deadline_spans_setup_and_query() {
+        let result = history_deadline(std::time::Duration::from_millis(20), async {
+            tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+            Ok(())
+        })
+        .await;
+        assert!(result.unwrap_err().to_string().contains("15 seconds"));
+    }
 }
