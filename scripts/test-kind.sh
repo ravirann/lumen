@@ -56,4 +56,4 @@ subjects:
     name: viewer
     namespace: lumen-e2e-a
 YAML
-cargo test --manifest-path "$root/src-tauri/Cargo.toml" --locked --test release_cluster --test debug_cluster --test devices_cluster --test gpu_cluster -- --ignored --nocapture
+cargo test --manifest-path "$root/src-tauri/Cargo.toml" --locked --test release_cluster --test debug_cluster --test devices_cluster --test gpu_cluster --test kueue_cluster -- --ignored --nocapture

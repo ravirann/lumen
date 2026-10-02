@@ -123,11 +123,7 @@ pub fn redact_message(message: &str) -> String {
                         end = value_start + 1 + offset + 1;
                         break;
                     }
-                    if !escaped && c == '\\' {
-                        escaped = true;
-                    } else {
-                        escaped = false;
-                    }
+                    escaped = !escaped && c == '\\';
                 }
             } else if let Some(offset) = safe[value_start..].find(char::is_whitespace) {
                 end = value_start + offset;
@@ -562,7 +558,7 @@ pub async fn snapshot(
     let pod_captured_at = chrono::Utc::now().to_rfc3339();
     let events_api = api(client, namespace, "", "Event", "events");
     let nodes_api = api(client, "", "", "Node", "nodes");
-    let (events, nodes, pvcs, claims) = tokio::join!(
+    let (events, nodes, pvcs, claims, kueue) = tokio::join!(
         list_source(
             &events_api,
             ResourceKind::Event,
@@ -572,11 +568,24 @@ pub async fn snapshot(
         ),
         list_source(&nodes_api, ResourceKind::Node, None, 20, SOURCE_TIMEOUT),
         referenced(client, namespace, &p, false),
-        referenced(client, namespace, &p, true)
+        referenced(client, namespace, &p, true),
+        super::kueue::admission(client, namespace, &p, &pod_captured_at)
     );
     get_pod(&pods, pod, expected_uid).await?;
     let at = chrono::Utc::now().to_rfc3339();
     let mut explanations = explain_pod(&p, &events.items, &at);
+    explanations.extend(kueue.items.iter().cloned());
+    let kueue = Source {
+        state: kueue.state,
+        complete: kueue.complete,
+        captured_at: kueue.captured_at,
+        items: kueue
+            .items
+            .into_iter()
+            .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+            .collect(),
+        message: kueue.message,
+    };
     for pvc in &pvcs.items {
         if pvc.pointer("/status/phase").and_then(Value::as_str) == Some("Pending") {
             explanations.push(explanation(
@@ -608,11 +617,16 @@ pub async fn snapshot(
         ("nodes".into(), nodes),
         ("pvcs".into(), pvcs),
         ("claims".into(), claims),
+        ("kueue".into(), kueue),
     ]);
     for (name, s) in &sources {
         if s.state != SourceState::Available || !s.complete {
             explanations.push(explanation(
-                "scheduling",
+                if name == "kueue" {
+                    "admission"
+                } else {
+                    "scheduling"
+                },
                 "unknown",
                 format!(
                     "{name} evidence is incomplete. {}",
@@ -864,7 +878,7 @@ mod review_tests {
             let event = json!({"apiVersion":"v1","kind":"Event","metadata":{"uid":"ev"},"involvedObject":{"uid":"u"},"reason":"FailedScheduling","message":text});
             let projected = sanitize(event, ResourceKind::Event);
             let pod = json!({"metadata":{"uid":"u"}});
-            let out=json!({"source":projected,"explanations":explain_pod(&pod,&[projected.clone()],"now")}).to_string();
+            let out=json!({"source":projected,"explanations":explain_pod(&pod,std::slice::from_ref(&projected),"now")}).to_string();
             for leaked in ["alpha", "beta", "gamma"] {
                 assert!(!out.contains(leaked), "{out}");
             }

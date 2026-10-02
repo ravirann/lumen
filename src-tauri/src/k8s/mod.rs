@@ -15,6 +15,7 @@ pub mod gpu_types;
 pub mod helm;
 pub mod helm_cli;
 pub mod kubeconfig;
+pub mod kueue;
 pub mod logs;
 pub mod metrics;
 pub mod metrics_explorer;
