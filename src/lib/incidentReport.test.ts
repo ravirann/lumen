@@ -213,3 +213,8 @@ describe("final log excerpt bounds", () => {
     expect(renderIncidentReportMarkdown(report)).toBe(markdown);
   });
 });
+
+it("redacts inline scheduling controller credentials at final rendering", () => {
+  expect(redactIncidentReportText('observed reason: token=synthetic-gpu-secret password: "quoted value"')).not.toContain("synthetic-gpu-secret");
+  expect(redactIncidentReportText('observed reason: token=synthetic-gpu-secret password: "quoted value"')).not.toContain("quoted value");
+});

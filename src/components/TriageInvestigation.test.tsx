@@ -6,7 +6,9 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { k8s, type PodDetails, type ResourceDetail } from "@/lib/k8s";
 import type { TriageIssue } from "@/lib/triage";
 import { buildIncidentReportData, renderIncidentReportMarkdown, type IncidentReportInput } from "@/lib/incidentReport";
+import { fetchGpuScheduling } from "@/lib/gpuScheduling";
 import { TriageInvestigation } from "./TriageInvestigation";
+vi.mock("@/lib/gpuScheduling", () => ({ fetchGpuScheduling: vi.fn() }));
 vi.mock("@/lib/k8s", () => ({ k8s: { getResource: vi.fn(), getPodDetails: vi.fn(), listEventsFor: vi.fn(), captureIncidentLogs: vi.fn() } }));
 vi.mock("@/components/IncidentReportDialog", () => ({ IncidentReportDialog: ({ open, input }: { open: boolean; input: IncidentReportInput }) => open ? <pre data-testid="report">{renderIncidentReportMarkdown(buildIncidentReportData(input))}</pre> : null }));
 const issue: TriageIssue = { id: "crash", group: "crashloop-restarts", severity: "high", title: "Pod restarting repeatedly", resource: { kind: "pod", namespace: "payments", name: "api" }, evidence: ["5 restarts"], nextActions: ["Check previous logs"] };
@@ -18,6 +20,7 @@ function renderInvestigation() {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(fetchGpuScheduling).mockImplementation(async (_ctx, ns, name, uid) => ({ pod: { api_version: "v1", kind: "Pod", namespace: ns, name, uid }, sources: { nodes: { state: "forbidden", complete: false, captured_at: "2026-10-02T00:00:00Z", items: [], message: "access denied" } }, explanations: [{ stage: "scheduling", confidence: "observed", message: "CURRENT_GPU_EVIDENCE token=synthetic-gpu-secret", sources: [], captured_at: "2026-10-02T00:00:00Z", transition_time: null, observed_generation: null }] }));
   vi.mocked(k8s.getResource).mockImplementation(async (_ns, kind, name) => detail(kind, name, kind === "pod" ? [{ kind: "ReplicaSet", name: "api-rs" }] : kind === "replicaset" ? [{ kind: "Deployment", name: "api" }] : []));
   vi.mocked(k8s.getPodDetails).mockResolvedValue({ name: "api", namespace: "payments", containers: [{ name: "sidecar", ready: true, restart_count: 0, state: "running" }, { name: "worker", ready: false, restart_count: 5, state: "CrashLoopBackOff" }] } as PodDetails);
   vi.mocked(k8s.listEventsFor).mockImplementation(async (_ns, kind, name) => [{ ts: "2026-09-05T23:59:00Z", type_: "Warning", reason: "BackOff", message: `${kind} warning`, involved_kind: kind, involved_name: name, involved_uid: `uid-${kind}-${name}`, count: 5 }, { ts: null, type_: "Warning", reason: "Unrelated", message: "other resource", involved_kind: "Service", involved_name: name, involved_uid: "other", count: 1 }, { ts: null, type_: "Normal", reason: "Pulled", message: "image already present", involved_kind: kind, involved_name: name, involved_uid: `uid-${kind}-${name}`, count: 1 }]);
@@ -201,4 +204,33 @@ it("invalidates old preview when query data changes the automatically suggested 
   expect(screen.getByLabelText("Investigation container")).toHaveValue("sidecar");
   await userEvent.click(screen.getByRole("button", { name: /export investigation/i }));
   expect(screen.getByTestId("report")).not.toHaveTextContent("WORKER_LOG");
+});
+
+it("exports current scheduling evidence but excludes cached evidence after failed refresh or metadata refresh", async () => {
+  const { client } = renderInvestigation(); await readyCapture();
+  await screen.findByText(/CURRENT_GPU_EVIDENCE/);
+  await userEvent.click(screen.getByRole("button", { name: /export investigation/i }));
+  expect(screen.getByTestId("report")).toHaveTextContent("CURRENT_GPU_EVIDENCE");
+  expect(screen.getByTestId("report")).toHaveTextContent("nodes: forbidden · incomplete");
+  expect(screen.getByTestId("report")).toHaveTextContent("scheduling · observed · captured 2026-10-02T00:00:00Z");
+  expect(screen.getByTestId("report")).not.toHaveTextContent("synthetic-gpu-secret");
+  vi.mocked(fetchGpuScheduling).mockRejectedValue(new Error("forbidden"));
+  await userEvent.click(screen.getByRole("button", { name: /refresh scheduling/i }));
+  await screen.findByText(/Scheduling evidence unavailable/);
+  expect(screen.getByTestId("report")).not.toHaveTextContent("CURRENT_GPU_EVIDENCE");
+  vi.mocked(k8s.getResource).mockRejectedValue(new Error("forbidden"));
+  await act(async () => { await client.invalidateQueries({ queryKey: ["investigation-resource"] }); });
+  expect(screen.getByTestId("report")).not.toHaveTextContent("CURRENT_GPU_EVIDENCE");
+});
+it("invalidates old scheduling explanations when metadata observes a replacement UID", async () => {
+  const { client } = renderInvestigation(); await readyCapture();
+  await screen.findByText(/CURRENT_GPU_EVIDENCE/);
+  await userEvent.click(screen.getByRole("button", { name: /export investigation/i }));
+  let resolve!: (value: Awaited<ReturnType<typeof fetchGpuScheduling>>) => void;
+  vi.mocked(fetchGpuScheduling).mockReturnValueOnce(new Promise((yes) => { resolve = yes; }));
+  await act(async () => { client.setQueryData(["investigation-resource", "prod", "payments", "pod", "api", "2026-09-06T00:00:00Z"], { ...detail("pod", "api"), yaml: "metadata:\n  uid: replacement-uid" }); });
+  await waitFor(() => expect(screen.getByTestId("report")).not.toHaveTextContent("CURRENT_GPU_EVIDENCE"));
+  await waitFor(() => expect(fetchGpuScheduling).toHaveBeenLastCalledWith("prod", "payments", "api", "replacement-uid"));
+  await act(async () => { resolve({ pod: { api_version: "v1", kind: "Pod", namespace: "payments", name: "api", uid: "replacement-uid" }, sources: {}, explanations: [] }); });
+  expect(screen.getByTestId("report")).not.toHaveTextContent("CURRENT_GPU_EVIDENCE");
 });

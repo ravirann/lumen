@@ -307,6 +307,8 @@ export function renderIncidentReportMarkdown(report: IncidentReportData): string
 
 export function redactIncidentReportText(text: string): string {
   let out = text;
+  // Controller and scheduler prose can contain inline or quoted credentials.
+  out = out.replace(/\b((?:token|password|client[_-]?secret|api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/gi, "$1[REDACTED]");
   out = out.replace(/(authorization:\s*bearer\s+)[^\s]+/gi, "$1[REDACTED]");
   out = out.replace(/\b(bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]");
   out = out.replace(
