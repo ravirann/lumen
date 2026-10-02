@@ -1,7 +1,7 @@
 //! Explicit-context read-only GPU scheduling IPC.
 use crate::{
     error::{AppError, AppResult},
-    k8s::{devices, gpu_scheduling, gpu_types::SchedulingSnapshot},
+    k8s::{devices, gpu_inventory, gpu_scheduling, gpu_types::SchedulingSnapshot},
     state::AppState,
 };
 use std::time::Duration;
@@ -41,6 +41,30 @@ pub async fn gpu_scheduling_snapshot(
         .map_err(|_| AppError::K8s("Could not connect to the selected context.".into()))?;
     gpu_scheduling::snapshot(&client, &namespace, &pod, &expected_uid).await
 }
+/// The UI must pin both the context and a concrete namespace for workload totals.
+#[tauri::command]
+pub async fn gpu_inventory_snapshot(
+    context: String,
+    namespace: String,
+    state: tauri::State<'_, AppState>,
+) -> AppResult<gpu_inventory::GpuInventorySnapshot> {
+    if context.trim().is_empty() {
+        return Err(AppError::K8s(
+            "An explicit cluster context is required.".into(),
+        ));
+    }
+    if namespace.is_empty() || !devices::valid_namespace(&namespace) {
+        return Err(AppError::K8s(
+            "A valid explicit namespace is required.".into(),
+        ));
+    }
+    let client = tokio::time::timeout(Duration::from_secs(10), state.k8s.client_for(&context))
+        .await
+        .map_err(|_| AppError::K8s("Connecting to the selected context timed out.".into()))?
+        .map_err(|_| AppError::K8s("Could not connect to the selected context.".into()))?;
+    Ok(gpu_inventory::snapshot(&client, &namespace).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
