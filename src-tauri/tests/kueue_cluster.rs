@@ -75,7 +75,9 @@ async fn kueue_real_schema_uid_namespace_and_scoped_scheduling() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let jobs = api(&admin, "lumen-e2e-a", "batch", "v1", "Job", "jobs");
-    let job=apply(&jobs,json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"kueue-train","namespace":"lumen-e2e-a"},"spec":{"suspend":true,"template":{"spec":{"restartPolicy":"Never","containers":[{"name":"c","image":"registry.k8s.io/pause:3.10"}]}}}})).await;
+    // This structural fixture owns its pod manually. Prevent the built-in Job
+    // controller from releasing that owner reference for a non-matching selector.
+    let job=apply(&jobs,json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"kueue-train","namespace":"lumen-e2e-a"},"spec":{"managedBy":"fixture.example.com/kueue-test","suspend":true,"template":{"spec":{"restartPolicy":"Never","containers":[{"name":"c","image":"registry.k8s.io/pause:3.10"}]}}}})).await;
     let owner = json!({"apiVersion":"batch/v1","kind":"Job","name":"kueue-train","uid":job["metadata"]["uid"],"controller":true});
     let wa = api(
         &admin,
@@ -129,10 +131,14 @@ async fn kueue_real_schema_uid_namespace_and_scoped_scheduling() {
     assert_eq!(out.sources["events"].state, SourceState::Available);
     assert_eq!(out.sources["pvcs"].state, SourceState::Available);
     assert_eq!(out.sources["kueue"].state, SourceState::Available);
-    assert!(out
-        .explanations
-        .iter()
-        .any(|e| e.message.contains("fixture quota exhausted")));
+    assert!(
+        out.explanations
+            .iter()
+            .any(|e| e.message.contains("fixture quota exhausted")),
+        "Kueue fixture evidence: {:?}; explanations: {:?}",
+        out.sources["kueue"],
+        out.explanations
+    );
     assert!(!serde_json::to_string(&out)
         .unwrap()
         .contains("must not leak"));
